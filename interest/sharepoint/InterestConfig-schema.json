@@ -1,0 +1,119 @@
+{
+  "listName": "InterestConfig",
+  "description": "Client configuration for interest accrual on overdue Xero invoices",
+  "siteUrl": "https://foritllc.sharepoint.com/finance",
+  "columns": [
+    {
+      "name": "XeroContactID",
+      "displayName": "Xero Contact ID",
+      "type": "Text",
+      "required": true,
+      "indexed": true,
+      "description": "Xero contact GUID (from Xero contact URL)"
+    },
+    {
+      "name": "ContactName",
+      "displayName": "Contact Name",
+      "type": "Text",
+      "required": true,
+      "description": "Client/company name for display"
+    },
+    {
+      "name": "AnnualRate",
+      "displayName": "Annual Interest Rate (%)",
+      "type": "Number",
+      "required": true,
+      "defaultValue": 18,
+      "min": 0,
+      "max": 100,
+      "decimalPlaces": 2,
+      "description": "Annual interest rate as percentage (e.g., 18 for 18%)"
+    },
+    {
+      "name": "MinDaysOverdue",
+      "displayName": "Minimum Days Overdue",
+      "type": "Number",
+      "required": true,
+      "defaultValue": 30,
+      "min": 0,
+      "max": 365,
+      "decimalPlaces": 0,
+      "description": "Days past due before interest starts accruing"
+    },
+    {
+      "name": "MinChargeAmount",
+      "displayName": "Minimum Charge Amount",
+      "type": "Currency",
+      "required": true,
+      "defaultValue": 1.00,
+      "min": 0,
+      "description": "Minimum interest amount to create a charge (skip smaller amounts)"
+    },
+    {
+      "name": "CurrencyCode",
+      "displayName": "Currency",
+      "type": "Choice",
+      "required": false,
+      "choices": ["USD", "CAD"],
+      "defaultValue": null,
+      "description": "If set, only calculate for invoices in this currency. Leave blank for all."
+    },
+    {
+      "name": "IsActive",
+      "displayName": "Active",
+      "type": "Boolean",
+      "required": true,
+      "defaultValue": true,
+      "description": "Enable/disable interest calculation for this client"
+    },
+    {
+      "name": "LastRunDate",
+      "displayName": "Last Run Date",
+      "type": "DateTime",
+      "required": false,
+      "dateOnly": true,
+      "description": "Last time interest was calculated for this client (updated by flow)"
+    },
+    {
+      "name": "LastInvoiceID",
+      "displayName": "Last Interest Invoice ID",
+      "type": "Text",
+      "required": false,
+      "description": "Xero invoice ID of most recent interest invoice created"
+    },
+    {
+      "name": "Notes",
+      "displayName": "Notes",
+      "type": "Note",
+      "required": false,
+      "richText": false,
+      "description": "Internal notes about this client's interest configuration"
+    }
+  ],
+  "views": [
+    {
+      "name": "Active Clients",
+      "isDefault": true,
+      "filter": "IsActive eq 1",
+      "columns": ["ContactName", "AnnualRate", "MinDaysOverdue", "LastRunDate", "IsActive"]
+    },
+    {
+      "name": "All Clients",
+      "isDefault": false,
+      "filter": null,
+      "columns": ["ContactName", "XeroContactID", "AnnualRate", "MinDaysOverdue", "MinChargeAmount", "CurrencyCode", "IsActive", "LastRunDate", "Notes"]
+    }
+  ],
+  "initialData": [
+    {
+      "XeroContactID": "99bcdc23-e430-4c87-aa36-439032a989f2",
+      "ContactName": "Pivot Airlines",
+      "AnnualRate": 18,
+      "MinDaysOverdue": 30,
+      "MinChargeAmount": 1.00,
+      "CurrencyCode": null,
+      "IsActive": true,
+      "Notes": "Primary client - 18% annual rate per agreement"
+    }
+  ]
+}

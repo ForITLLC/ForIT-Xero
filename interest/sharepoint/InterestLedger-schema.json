@@ -1,0 +1,170 @@
+{
+  "listName": "InterestLedger",
+  "description": "Audit log of all interest reconciliation actions - tracks every change for full history",
+  "siteUrl": "https://foritllc.sharepoint.com/finance/billing",
+  "columns": [
+    {
+      "name": "SourceInvoiceId",
+      "displayName": "Source Invoice ID",
+      "type": "Text",
+      "required": true,
+      "indexed": true,
+      "description": "Xero invoice GUID of the original overdue invoice"
+    },
+    {
+      "name": "SourceInvoiceNumber",
+      "displayName": "Source Invoice Number",
+      "type": "Text",
+      "required": true,
+      "description": "Xero invoice number (e.g., INV-0304)"
+    },
+    {
+      "name": "InterestInvoiceId",
+      "displayName": "Interest Invoice ID",
+      "type": "Text",
+      "required": true,
+      "indexed": true,
+      "description": "Xero invoice GUID of the interest invoice"
+    },
+    {
+      "name": "InterestInvoiceNumber",
+      "displayName": "Interest Invoice Number",
+      "type": "Text",
+      "required": false,
+      "description": "Xero invoice number of the interest invoice"
+    },
+    {
+      "name": "Action",
+      "displayName": "Action",
+      "type": "Choice",
+      "required": true,
+      "choices": ["Created", "Updated", "Credited", "AdditionalCharge"],
+      "description": "What action was taken"
+    },
+    {
+      "name": "PreviousAmount",
+      "displayName": "Previous Amount",
+      "type": "Currency",
+      "required": true,
+      "description": "Interest amount before this action"
+    },
+    {
+      "name": "NewAmount",
+      "displayName": "New Amount",
+      "type": "Currency",
+      "required": true,
+      "description": "Interest amount after this action"
+    },
+    {
+      "name": "Delta",
+      "displayName": "Delta",
+      "type": "Currency",
+      "required": true,
+      "description": "Change amount (NewAmount - PreviousAmount)"
+    },
+    {
+      "name": "Reason",
+      "displayName": "Reason",
+      "type": "Choice",
+      "required": true,
+      "choices": ["Initial", "DueDateChanged", "PartialPayment", "SourceVoided", "PrincipalChanged", "DailyAccrual", "ManualAdjustment"],
+      "description": "Why this change was made"
+    },
+    {
+      "name": "SourceDueDate",
+      "displayName": "Source Due Date",
+      "type": "DateTime",
+      "required": true,
+      "description": "Due date of source invoice at time of calculation (to detect changes)"
+    },
+    {
+      "name": "SourceAmountDue",
+      "displayName": "Source Amount Due",
+      "type": "Currency",
+      "required": true,
+      "description": "Amount due on source invoice at time of calculation"
+    },
+    {
+      "name": "DaysOverdue",
+      "displayName": "Days Overdue",
+      "type": "Number",
+      "required": true,
+      "decimalPlaces": 0,
+      "description": "Total days overdue at time of calculation"
+    },
+    {
+      "name": "Rate",
+      "displayName": "Interest Rate",
+      "type": "Number",
+      "required": true,
+      "decimalPlaces": 4,
+      "description": "Annual interest rate as decimal (e.g., 0.24 for 24%)"
+    },
+    {
+      "name": "CreditNoteId",
+      "displayName": "Credit Note ID",
+      "type": "Text",
+      "required": false,
+      "description": "Xero credit note GUID if credit was issued"
+    },
+    {
+      "name": "CreditNoteNumber",
+      "displayName": "Credit Note Number",
+      "type": "Text",
+      "required": false,
+      "description": "Xero credit note number"
+    },
+    {
+      "name": "ContactId",
+      "displayName": "Contact ID",
+      "type": "Text",
+      "required": true,
+      "indexed": true,
+      "description": "Xero contact GUID"
+    },
+    {
+      "name": "ContactName",
+      "displayName": "Contact Name",
+      "type": "Text",
+      "required": true,
+      "description": "Client/company name"
+    },
+    {
+      "name": "Notes",
+      "displayName": "Notes",
+      "type": "Note",
+      "required": false,
+      "richText": false,
+      "description": "Additional context or details"
+    }
+  ],
+  "views": [
+    {
+      "name": "Recent Activity",
+      "isDefault": true,
+      "filter": null,
+      "sort": "Created desc",
+      "columns": ["Created", "ContactName", "SourceInvoiceNumber", "Action", "Delta", "Reason", "NewAmount"]
+    },
+    {
+      "name": "By Source Invoice",
+      "isDefault": false,
+      "filter": null,
+      "sort": "SourceInvoiceNumber asc, Created desc",
+      "columns": ["SourceInvoiceNumber", "Created", "Action", "PreviousAmount", "NewAmount", "Delta", "Reason"]
+    },
+    {
+      "name": "Credits Only",
+      "isDefault": false,
+      "filter": "Action eq 'Credited'",
+      "columns": ["Created", "ContactName", "SourceInvoiceNumber", "Delta", "CreditNoteNumber", "Notes"]
+    },
+    {
+      "name": "By Contact",
+      "isDefault": false,
+      "filter": null,
+      "sort": "ContactName asc, Created desc",
+      "columns": ["ContactName", "SourceInvoiceNumber", "Action", "NewAmount", "Reason", "Created"]
+    }
+  ]
+}

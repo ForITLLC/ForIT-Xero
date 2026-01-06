@@ -1,0 +1,25 @@
+{
+  "name": "forit-xero-mcp-functions",
+  "version": "1.0.0",
+  "description": "Azure Functions for ForIT Xero MCP multi-tenant auth",
+  "main": "dist/src/functions/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "start": "func start",
+    "prestart": "npm run build"
+  },
+  "dependencies": {
+    "@azure/functions": "^4.0.0",
+    "@azure/identity": "^4.0.0",
+    "@azure/keyvault-secrets": "^4.7.0",
+    "mssql": "^10.0.0",
+    "stripe": "^20.1.0",
+    "xero-node": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.0.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

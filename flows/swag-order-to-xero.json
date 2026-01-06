@@ -1,0 +1,228 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {},
+  "triggers": {
+    "When_swag_order_completed": {
+      "type": "Request",
+      "kind": "Http",
+      "inputs": {
+        "schema": {
+          "type": "object",
+          "properties": {
+            "order_id": { "type": "string" },
+            "email": { "type": "string" },
+            "customer_name": { "type": "string" },
+            "total_cents": { "type": "integer" },
+            "currency": { "type": "string" },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": { "type": "string" },
+                  "sku": { "type": "string" },
+                  "quantity": { "type": "integer" },
+                  "unit_price_cents": { "type": "integer" }
+                }
+              }
+            },
+            "shipping": {
+              "type": "object",
+              "properties": {
+                "name": { "type": "string" },
+                "address1": { "type": "string" },
+                "city": { "type": "string" },
+                "state": { "type": "string" },
+                "zip": { "type": "string" },
+                "country": { "type": "string" }
+              }
+            },
+            "stripe_session_id": { "type": "string" },
+            "employee_free_item": { "type": "boolean" }
+          },
+          "required": ["order_id", "email", "total_cents", "items"]
+        }
+      }
+    }
+  },
+  "actions": {
+    "Initialize_LineItems": {
+      "runAfter": {},
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [{
+          "name": "XeroLineItems",
+          "type": "array",
+          "value": []
+        }]
+      }
+    },
+    "Build_Line_Items": {
+      "runAfter": {
+        "Initialize_LineItems": ["Succeeded"]
+      },
+      "type": "Foreach",
+      "foreach": "@triggerBody()?['items']",
+      "actions": {
+        "Append_Line_Item": {
+          "type": "AppendToArrayVariable",
+          "inputs": {
+            "name": "XeroLineItems",
+            "value": {
+              "Description": "@{items('Build_Line_Items')?['name']} (@{items('Build_Line_Items')?['sku']})",
+              "Quantity": "@items('Build_Line_Items')?['quantity']",
+              "UnitAmount": "@div(float(items('Build_Line_Items')?['unit_price_cents']), 100)",
+              "AccountCode": "400"
+            }
+          }
+        }
+      }
+    },
+    "Search_Contact_By_Email": {
+      "runAfter": {
+        "Build_Line_Items": ["Succeeded"]
+      },
+      "type": "Http",
+      "inputs": {
+        "method": "GET",
+        "uri": "https://xero.forit.io/api/connector/contacts",
+        "headers": {
+          "x-api-key": "@{parameters('XeroApiKey')}"
+        },
+        "queries": {
+          "email": "@triggerBody()?['email']"
+        }
+      },
+      "runtimeConfiguration": {
+        "contentTransfer": {
+          "transferMode": "Chunked"
+        }
+      }
+    },
+    "Condition_Contact_Exists": {
+      "runAfter": {
+        "Search_Contact_By_Email": ["Succeeded"]
+      },
+      "type": "If",
+      "expression": {
+        "and": [{
+          "greater": ["@length(body('Search_Contact_By_Email')?['contacts'])", 0]
+        }]
+      },
+      "actions": {
+        "Set_Contact_ID": {
+          "type": "SetVariable",
+          "inputs": {
+            "name": "ContactID",
+            "value": "@body('Search_Contact_By_Email')?['contacts']?[0]?['ContactID']"
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Create_Contact": {
+            "type": "Http",
+            "inputs": {
+              "method": "POST",
+              "uri": "https://xero.forit.io/api/connector/contacts",
+              "headers": {
+                "x-api-key": "@{parameters('XeroApiKey')}",
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "Name": "@triggerBody()?['customer_name']",
+                "EmailAddress": "@triggerBody()?['email']"
+              }
+            }
+          },
+          "Set_New_Contact_ID": {
+            "runAfter": {
+              "Create_Contact": ["Succeeded"]
+            },
+            "type": "SetVariable",
+            "inputs": {
+              "name": "ContactID",
+              "value": "@body('Create_Contact')?['ContactID']"
+            }
+          }
+        }
+      }
+    },
+    "Initialize_ContactID": {
+      "runAfter": {},
+      "type": "InitializeVariable",
+      "inputs": {
+        "variables": [{
+          "name": "ContactID",
+          "type": "string",
+          "value": ""
+        }]
+      }
+    },
+    "Create_Invoice": {
+      "runAfter": {
+        "Condition_Contact_Exists": ["Succeeded"]
+      },
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://xero.forit.io/api/connector/invoices",
+        "headers": {
+          "x-api-key": "@{parameters('XeroApiKey')}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "Type": "ACCREC",
+          "Contact": {
+            "ContactID": "@variables('ContactID')"
+          },
+          "LineItems": "@variables('XeroLineItems')",
+          "Status": "AUTHORISED",
+          "Reference": "SWAG-@{triggerBody()?['order_id']}",
+          "CurrencyCode": "@{coalesce(triggerBody()?['currency'], 'USD')}"
+        }
+      }
+    },
+    "Create_Payment": {
+      "runAfter": {
+        "Create_Invoice": ["Succeeded"]
+      },
+      "type": "Http",
+      "inputs": {
+        "method": "POST",
+        "uri": "https://xero.forit.io/api/connector/payments",
+        "headers": {
+          "x-api-key": "@{parameters('XeroApiKey')}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "Invoice": {
+            "InvoiceID": "@body('Create_Invoice')?['InvoiceID']"
+          },
+          "Account": {
+            "Code": "090"
+          },
+          "Amount": "@div(float(triggerBody()?['total_cents']), 100)",
+          "Date": "@utcNow('yyyy-MM-dd')",
+          "Reference": "Stripe @{triggerBody()?['stripe_session_id']}"
+        }
+      }
+    },
+    "Response_Success": {
+      "runAfter": {
+        "Create_Payment": ["Succeeded"]
+      },
+      "type": "Response",
+      "kind": "Http",
+      "inputs": {
+        "statusCode": 200,
+        "body": {
+          "success": true,
+          "invoice_id": "@body('Create_Invoice')?['InvoiceID']",
+          "payment_id": "@body('Create_Payment')?['PaymentID']"
+        }
+      }
+    }
+  }
+}
