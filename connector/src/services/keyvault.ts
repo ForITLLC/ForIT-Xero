@@ -19,4 +19,9 @@ export const SECRETS = {
   // Shared with interest app
   XERO_REFRESH_TOKEN: 'xero-refresh-token',
   XERO_TENANT_ID: 'xero-tenant-id',
+  // Portal-to-connector authentication
+  PORTAL_API_KEY: 'PORTAL-API-KEY',
+  // Stripe integration
+  STRIPE_SECRET_KEY: 'STRIPE-SECRET-KEY',
+  STRIPE_WEBHOOK_SECRET: 'STRIPE-WEBHOOK-SECRET',
 };

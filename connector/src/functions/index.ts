@@ -4,4 +4,6 @@
 
 import './mcpAuth';
 import './connector';
+import './connect';
+import './subscriptions';
 // products and swag moved to forit-saas-api

@@ -146,12 +146,7 @@ app.http('Signup', {
   handler: disabledEndpoint,
 });
 
-app.http('AuthCallback', {
-  methods: ['GET'],
-  authLevel: 'anonymous',
-  route: 'callback',
-  handler: disabledEndpoint,
-});
+// Callback route is now handled by connect.ts
 
 app.http('GenerateNewKey', {
   methods: ['POST'],
