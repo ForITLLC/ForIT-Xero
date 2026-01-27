@@ -1,0 +1,23 @@
+{
+  "name": "@forit/xero-mcp",
+  "version": "1.0.0",
+  "description": "ForIT Xero MCP Server for Claude Desktop",
+  "main": "dist/index.js",
+  "bin": {
+    "forit-xero-mcp": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "keywords": ["mcp", "xero", "claude", "forit"],
+  "author": "ForIT LLC",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

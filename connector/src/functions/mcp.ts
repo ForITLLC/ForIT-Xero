@@ -12,13 +12,9 @@ async function getMcpConfig(request: HttpRequest, context: InvocationContext): P
     mcpServers: {
       'forit-xero': {
         command: 'npx',
-        args: ['-y', '@anthropic/mcp-fetch'],
+        args: ['-y', '@forit/xero-mcp'],
         env: {
-          MCP_FETCH_BASE_URL: 'https://xero.forit.io/api/connector',
-          MCP_FETCH_HEADERS: JSON.stringify({
-            'x-api-key': apiKey,
-            'Content-Type': 'application/json'
-          })
+          FORIT_XERO_API_KEY: apiKey
         }
       }
     }
