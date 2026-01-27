@@ -223,6 +223,26 @@ export async function updateXeroTokens(
     `);
 }
 
+export async function deleteXeroConnection(customerId: string, connectionId: string): Promise<boolean> {
+  const db = await getDbPool();
+  const result = await db.request()
+    .input('id', sql.UniqueIdentifier, connectionId)
+    .input('customer_id', sql.UniqueIdentifier, customerId)
+    .query(`
+      DELETE FROM xero_connections
+      WHERE id = @id AND customer_id = @customer_id
+    `);
+  return result.rowsAffected[0] > 0;
+}
+
+export async function getXeroConnectionsByCustomer(customerId: string): Promise<XeroConnection[]> {
+  const db = await getDbPool();
+  const result = await db.request()
+    .input('customer_id', sql.UniqueIdentifier, customerId)
+    .query('SELECT * FROM xero_connections WHERE customer_id = @customer_id ORDER BY created_at DESC');
+  return result.recordset || [];
+}
+
 // Customer-Product functions (use saasPool - forit-saas-db)
 export async function grantProductAccess(customerId: string, productSlug: string): Promise<void> {
   const db = await getSaasPool();
