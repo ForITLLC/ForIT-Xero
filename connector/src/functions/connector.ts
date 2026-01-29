@@ -121,6 +121,7 @@ async function deletePayment(request: HttpRequest, context: InvocationContext): 
         'Authorization': `Bearer ${auth.accessToken}`,
         'Xero-Tenant-Id': auth.tenantId,
         'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
       body: JSON.stringify({ Status: 'DELETED' }),
     });
@@ -162,16 +163,23 @@ async function setInvoiceStatus(request: HttpRequest, context: InvocationContext
         'Authorization': `Bearer ${auth.accessToken}`,
         'Xero-Tenant-Id': auth.tenantId,
         'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
       body: JSON.stringify({ Status: body.status }),
     });
 
+    const responseText = await response.text();
+
     if (!response.ok) {
-      const error = await response.text();
-      return { status: response.status, jsonBody: { error } };
+      return { status: response.status, jsonBody: { error: responseText } };
     }
 
-    const result = await response.json();
+    let result: unknown;
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: responseText.substring(0, 500) } };
+    }
     return { status: 200, jsonBody: result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -199,15 +207,22 @@ async function recodeInvoiceLine(request: HttpRequest, context: InvocationContex
       headers: {
         'Authorization': `Bearer ${auth.accessToken}`,
         'Xero-Tenant-Id': auth.tenantId,
+        'Accept': 'application/json',
       },
     });
 
+    const getResponseText = await getResponse.text();
+
     if (!getResponse.ok) {
-      const error = await getResponse.text();
-      return { status: getResponse.status, jsonBody: { error } };
+      return { status: getResponse.status, jsonBody: { error: getResponseText } };
     }
 
-    const invoice = await getResponse.json() as { Invoices: Array<{ LineItems: Array<{ LineItemID: string; AccountCode: string }> }> };
+    let invoice: { Invoices: Array<{ LineItems: Array<{ LineItemID: string; AccountCode: string }> }> };
+    try {
+      invoice = JSON.parse(getResponseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: getResponseText.substring(0, 500) } };
+    }
     const lineItems = invoice.Invoices[0].LineItems.map(li => {
       if (li.LineItemID === body.lineItemId) {
         return { ...li, AccountCode: body.accountCode };
@@ -222,16 +237,23 @@ async function recodeInvoiceLine(request: HttpRequest, context: InvocationContex
         'Authorization': `Bearer ${auth.accessToken}`,
         'Xero-Tenant-Id': auth.tenantId,
         'Content-Type': 'application/json',
+        'Accept': 'application/json',
       },
       body: JSON.stringify({ LineItems: lineItems }),
     });
 
+    const updateResponseText = await updateResponse.text();
+
     if (!updateResponse.ok) {
-      const error = await updateResponse.text();
-      return { status: updateResponse.status, jsonBody: { error } };
+      return { status: updateResponse.status, jsonBody: { error: updateResponseText } };
     }
 
-    const result = await updateResponse.json();
+    let result: unknown;
+    try {
+      result = JSON.parse(updateResponseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: updateResponseText.substring(0, 500) } };
+    }
     return { status: 200, jsonBody: result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -256,15 +278,22 @@ async function getInvoice(request: HttpRequest, context: InvocationContext): Pro
       headers: {
         'Authorization': `Bearer ${auth.accessToken}`,
         'Xero-Tenant-Id': auth.tenantId,
+        'Accept': 'application/json',
       },
     });
 
+    const responseText = await response.text();
+
     if (!response.ok) {
-      const error = await response.text();
-      return { status: response.status, jsonBody: { error } };
+      return { status: response.status, jsonBody: { error: responseText } };
     }
 
-    const result = await response.json();
+    let result: unknown;
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: responseText.substring(0, 500) } };
+    }
     return { status: 200, jsonBody: result };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -292,12 +321,18 @@ async function getInvoicePayments(request: HttpRequest, context: InvocationConte
       },
     });
 
+    const responseText = await response.text();
+
     if (!response.ok) {
-      const error = await response.text();
-      return { status: response.status, jsonBody: { error } };
+      return { status: response.status, jsonBody: { error: responseText } };
     }
 
-    const invoice = await response.json() as { Invoices: Array<{ Payments: Array<unknown> }> };
+    let invoice: { Invoices: Array<{ Payments: Array<unknown> }> };
+    try {
+      invoice = JSON.parse(responseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: responseText.substring(0, 500) } };
+    }
     return { status: 200, jsonBody: { payments: invoice.Invoices[0].Payments || [] } };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
