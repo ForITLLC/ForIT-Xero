@@ -223,6 +223,16 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
     // TODO: Support multi-tenant selection in future
     const tenant = tenants[0];
 
+    if (!tenant.tenantId) {
+      context.error('Xero tenant missing tenantId', { tenant });
+      return {
+        status: 302,
+        headers: {
+          Location: `${state.return_url}?error=invalid_tenant&error_description=${encodeURIComponent('Xero organization data incomplete. Please try again or contact support.')}`,
+        },
+      };
+    }
+
     // Save connection to database
     await saveXeroConnection(
       state.customer_id,

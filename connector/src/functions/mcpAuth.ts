@@ -74,7 +74,18 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
     if (!connection) {
       return {
         status: 404,
-        jsonBody: { error: 'Not connected to Xero. Contact support@forit.io for access.' },
+        jsonBody: { error: 'Not connected to Xero', portalUrl: 'https://forit.io/portal' },
+      };
+    }
+
+    if (!connection.tenant_id) {
+      return {
+        status: 400,
+        jsonBody: {
+          error: 'Xero connection incomplete',
+          message: 'No Xero organization selected. Please re-authorize through the ForIT portal.',
+          portalUrl: 'https://forit.io/portal',
+        },
       };
     }
 
@@ -82,37 +93,49 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
     if (connection.expires_at && now > connection.expires_at - 300) {
       context.log('Refreshing expired token', { customerId: customer.id });
 
-      const xeroClient = await getXeroClient(true);
-      await xeroClient.initialize();
-      xeroClient.setTokenSet({
-        refresh_token: connection.refresh_token,
-        access_token: connection.access_token,
-        expires_at: connection.expires_at,
-      });
+      try {
+        const xeroClient = await getXeroClient(true);
+        await xeroClient.initialize();
+        xeroClient.setTokenSet({
+          refresh_token: connection.refresh_token,
+          access_token: connection.access_token,
+          expires_at: connection.expires_at,
+        });
 
-      const newTokenSet = await xeroClient.refreshToken();
+        const newTokenSet = await xeroClient.refreshToken();
 
-      await updateXeroTokens(
-        customer.id,
-        newTokenSet.access_token || '',
-        newTokenSet.refresh_token || connection.refresh_token || '',
-        newTokenSet.expires_at || 0
-      );
+        await updateXeroTokens(
+          customer.id,
+          newTokenSet.access_token || '',
+          newTokenSet.refresh_token || connection.refresh_token || '',
+          newTokenSet.expires_at || 0
+        );
 
-      // Also update Key Vault for interest app
-      if (newTokenSet.refresh_token) {
-        await setSecret(SECRETS.XERO_REFRESH_TOKEN, newTokenSet.refresh_token);
+        // Also update Key Vault for interest app
+        if (newTokenSet.refresh_token) {
+          await setSecret(SECRETS.XERO_REFRESH_TOKEN, newTokenSet.refresh_token);
+        }
+
+        return {
+          status: 200,
+          jsonBody: {
+            access_token: newTokenSet.access_token,
+            refresh_token: newTokenSet.refresh_token,
+            tenant_id: connection.tenant_id,
+            expires_at: newTokenSet.expires_at,
+          },
+        };
+      } catch (error) {
+        context.error('Token refresh failed', { customerId: customer.id, error });
+        return {
+          status: 401,
+          jsonBody: {
+            error: 'Xero connection expired',
+            message: 'The Xero refresh token has expired (tokens expire after 60 days of inactivity). Please re-authorize through the ForIT portal.',
+            portalUrl: 'https://forit.io/portal',
+          },
+        };
       }
-
-      return {
-        status: 200,
-        jsonBody: {
-          access_token: newTokenSet.access_token,
-          refresh_token: newTokenSet.refresh_token,
-          tenant_id: connection.tenant_id,
-          expires_at: newTokenSet.expires_at,
-        },
-      };
     }
 
     return {
