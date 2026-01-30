@@ -103,6 +103,86 @@ async function authenticateRequest(request: HttpRequest, context: InvocationCont
 }
 
 /**
+ * Get Default Tenant - Returns the Xero tenant ID for this connection
+ * Required by flows that need to pass xero-tenant-id to other operations
+ */
+async function getDefaultTenant(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const auth = await authenticateRequest(request, context);
+    if (!isAuthSuccess(auth)) return auth;
+
+    // Return the tenant info from the authenticated connection
+    return {
+      status: 200,
+      jsonBody: {
+        tenantId: auth.tenantId,
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, jsonBody: { error: message } };
+  }
+}
+
+/**
+ * Get Invoices - List invoices with optional filtering and pagination
+ * Supports the same parameters as Xero's Invoices endpoint
+ */
+async function getInvoices(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const auth = await authenticateRequest(request, context);
+    if (!isAuthSuccess(auth)) return auth;
+
+    // Build query parameters
+    const url = new URL('https://api.xero.com/api.xro/2.0/Invoices');
+
+    // Support filtering
+    const where = request.query.get('where');
+    if (where) url.searchParams.set('where', where);
+
+    // Support pagination
+    const page = request.query.get('page');
+    if (page) url.searchParams.set('page', page);
+
+    // Support ordering
+    const order = request.query.get('order');
+    if (order) url.searchParams.set('order', order);
+
+    // Support modified since
+    const modifiedAfter = request.headers.get('If-Modified-Since');
+
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${auth.accessToken}`,
+      'Xero-Tenant-Id': auth.tenantId,
+      'Accept': 'application/json',
+    };
+
+    if (modifiedAfter) {
+      headers['If-Modified-Since'] = modifiedAfter;
+    }
+
+    const response = await fetch(url.toString(), { headers });
+
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      return { status: response.status, jsonBody: { error: responseText } };
+    }
+
+    let result: unknown;
+    try {
+      result = JSON.parse(responseText);
+    } catch {
+      return { status: 500, jsonBody: { error: 'Invalid JSON from Xero', raw: responseText.substring(0, 500) } };
+    }
+    return { status: 200, jsonBody: result };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, jsonBody: { error: message } };
+  }
+}
+
+/**
  * Delete Payment - Required to edit paid invoices
  */
 async function deletePayment(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -642,6 +722,41 @@ async function getApiDefinition(request: HttpRequest, context: InvocationContext
     },
     security: [{ apiKey: [] }],
     paths: {
+      '/tenant': {
+        get: {
+          operationId: 'GetDefaultTenant',
+          summary: 'Get the default Xero tenant ID',
+          description: 'Returns the Xero organization (tenant) ID associated with this API key',
+          responses: {
+            '200': {
+              description: 'Tenant information',
+              schema: { type: 'object', properties: { tenantId: { type: 'string', description: 'The Xero tenant ID' } } },
+            },
+          },
+        },
+      },
+      '/invoices': {
+        get: {
+          operationId: 'GetInvoices',
+          summary: 'List invoices',
+          description: 'Get a list of invoices with optional filtering and pagination',
+          parameters: [
+            { name: 'xero-tenant-id', in: 'header', required: false, type: 'string', description: 'Xero tenant ID (optional - uses default if not provided)' },
+            { name: 'where', in: 'query', required: false, type: 'string', description: 'Filter expression (e.g., Status!="VOIDED"&&Status!="DELETED")' },
+            { name: 'page', in: 'query', required: false, type: 'integer', description: 'Page number for pagination (starts at 1)' },
+            { name: 'order', in: 'query', required: false, type: 'string', description: 'Order by field (e.g., "Date DESC")' },
+          ],
+          responses: { '200': { description: 'List of invoices' } },
+        },
+        post: {
+          operationId: 'CreateInvoice',
+          summary: 'Create a new invoice',
+          parameters: [
+            { name: 'body', in: 'body', required: true, schema: { type: 'object', properties: { Type: { type: 'string', enum: ['ACCREC', 'ACCPAY'] }, Contact: { type: 'object', properties: { ContactID: { type: 'string' } } }, LineItems: { type: 'array', items: { type: 'object', properties: { Description: { type: 'string' }, Quantity: { type: 'number' }, UnitAmount: { type: 'number' }, AccountCode: { type: 'string' } } } }, Status: { type: 'string', enum: ['DRAFT', 'SUBMITTED', 'AUTHORISED'] }, Reference: { type: 'string' }, CurrencyCode: { type: 'string' }, DueDate: { type: 'string' } }, required: ['Type', 'Contact', 'LineItems'] } },
+          ],
+          responses: { '201': { description: 'Invoice created' } },
+        },
+      },
       '/contacts': {
         get: {
           operationId: 'SearchContacts',
@@ -664,16 +779,6 @@ async function getApiDefinition(request: HttpRequest, context: InvocationContext
           summary: 'List chart of accounts',
           parameters: [{ name: 'type', in: 'query', required: false, type: 'string', description: 'Account type filter (REVENUE, EXPENSE, BANK, etc. or ALL)' }],
           responses: { '200': { description: 'List of accounts' } },
-        },
-      },
-      '/invoices': {
-        post: {
-          operationId: 'CreateInvoice',
-          summary: 'Create a new invoice',
-          parameters: [
-            { name: 'body', in: 'body', required: true, schema: { type: 'object', properties: { Type: { type: 'string', enum: ['ACCREC', 'ACCPAY'] }, Contact: { type: 'object', properties: { ContactID: { type: 'string' } } }, LineItems: { type: 'array', items: { type: 'object', properties: { Description: { type: 'string' }, Quantity: { type: 'number' }, UnitAmount: { type: 'number' }, AccountCode: { type: 'string' } } } }, Status: { type: 'string', enum: ['DRAFT', 'SUBMITTED', 'AUTHORISED'] }, Reference: { type: 'string' }, CurrencyCode: { type: 'string' }, DueDate: { type: 'string' } }, required: ['Type', 'Contact', 'LineItems'] } },
-          ],
-          responses: { '201': { description: 'Invoice created' } },
         },
       },
       '/invoices/{invoiceId}': {
@@ -744,6 +849,20 @@ app.http('ConnectorApiDefinition', {
   authLevel: 'anonymous',
   route: 'connector/apiDefinition.swagger.json',
   handler: getApiDefinition,
+});
+
+app.http('ConnectorGetDefaultTenant', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'connector/tenant',
+  handler: getDefaultTenant,
+});
+
+app.http('ConnectorGetInvoices', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'connector/invoices',
+  handler: getInvoices,
 });
 
 app.http('ConnectorGetInvoice', {
