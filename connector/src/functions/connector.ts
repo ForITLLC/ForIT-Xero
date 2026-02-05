@@ -934,3 +934,82 @@ app.http('ConnectorCreateInvoice', {
   route: 'connector/invoices',
   handler: createInvoice,
 });
+
+/**
+ * Generic Passthrough - Forwards any unmatched route to Xero API
+ * This catches /connector/{*path} and passes through to https://api.xero.com/api.xro/2.0/{path}
+ */
+async function xeroPassthrough(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const auth = await authenticateRequest(request, context);
+    if (!isAuthSuccess(auth)) return auth;
+
+    // Get the path after /connector/
+    const path = request.params.path || '';
+
+    // Build target URL
+    const targetUrl = new URL(`https://api.xero.com/api.xro/2.0/${path}`);
+
+    // Copy query parameters
+    request.query.forEach((value, key) => {
+      targetUrl.searchParams.set(key, value);
+    });
+
+    const headers: Record<string, string> = {
+      'Authorization': `Bearer ${auth.accessToken}`,
+      'Xero-Tenant-Id': auth.tenantId,
+      'Accept': 'application/json',
+    };
+
+    // Copy If-Modified-Since if present
+    const modifiedAfter = request.headers.get('If-Modified-Since');
+    if (modifiedAfter) {
+      headers['If-Modified-Since'] = modifiedAfter;
+    }
+
+    // Prepare fetch options
+    const fetchOptions: RequestInit = {
+      method: request.method,
+      headers,
+    };
+
+    // Include body for POST/PUT/PATCH
+    if (['POST', 'PUT', 'PATCH'].includes(request.method)) {
+      headers['Content-Type'] = 'application/json';
+      const bodyText = await request.text();
+      if (bodyText) {
+        fetchOptions.body = bodyText;
+      }
+    }
+
+    context.log(`Xero passthrough: ${request.method} ${targetUrl.toString()}`);
+
+    const response = await fetch(targetUrl.toString(), fetchOptions);
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      return { status: response.status, jsonBody: { error: responseText } };
+    }
+
+    // Try to parse as JSON, otherwise return raw
+    try {
+      const result = JSON.parse(responseText);
+      return { status: response.status, jsonBody: result };
+    } catch {
+      return { status: response.status, body: responseText };
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    context.error('Xero passthrough error', { error: message });
+    return { status: 500, jsonBody: { error: message } };
+  }
+}
+
+// Generic passthrough - catches any unmatched route
+// MUST be registered last so specific routes take precedence
+app.http('ConnectorPassthrough', {
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+  authLevel: 'anonymous',
+  route: 'connector/{*path}',
+  handler: xeroPassthrough,
+});
