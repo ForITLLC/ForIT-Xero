@@ -21,7 +21,7 @@ async function getXeroClient(): Promise<XeroClient> {
     clientId: XERO_CLIENT_ID,
     clientSecret,
     redirectUris: [`${BASE_URL}/api/callback`],
-    scopes: ['openid', 'profile', 'email', 'accounting.transactions', 'accounting.settings', 'accounting.contacts', 'offline_access'],
+    scopes: ['openid', 'profile', 'email', 'accounting.transactions', 'accounting.settings', 'accounting.contacts', 'finance.bankstatementsplus.read', 'offline_access'],
   });
 }
 
@@ -937,7 +937,8 @@ app.http('ConnectorCreateInvoice', {
 
 /**
  * Generic Passthrough - Forwards any unmatched route to Xero API
- * This catches /connector/{*path} and passes through to https://api.xero.com/api.xro/2.0/{path}
+ * Routes to api.xro/2.0/{path} by default, or finance.xro/1.0/{path} for Finance API
+ * Finance API paths: use "finance.xro/1.0/..." or "finance/..." prefix
  */
 async function xeroPassthrough(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
@@ -947,8 +948,14 @@ async function xeroPassthrough(request: HttpRequest, context: InvocationContext)
     // Get the path after /connector/
     const path = request.params.path || '';
 
-    // Build target URL
-    const targetUrl = new URL(`https://api.xero.com/api.xro/2.0/${path}`);
+    // Build target URL - route Finance API paths to finance.xro/1.0/, everything else to api.xro/2.0/
+    let targetUrl: URL;
+    if (path.startsWith('finance.xro/') || path.startsWith('finance/')) {
+      const financePath = path.startsWith('finance/') ? `finance.xro/1.0/${path.slice(8)}` : path;
+      targetUrl = new URL(`https://api.xero.com/${financePath}`);
+    } else {
+      targetUrl = new URL(`https://api.xero.com/api.xro/2.0/${path}`);
+    }
 
     // Copy query parameters
     request.query.forEach((value, key) => {
