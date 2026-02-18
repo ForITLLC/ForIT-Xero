@@ -35,6 +35,7 @@ async function getXeroClient(includeSecret = false, state?: string): Promise<Xer
       'accounting.transactions',
       'accounting.settings',
       'accounting.contacts',
+      'finance.bankstatementsplus.read',
       'offline_access',
     ],
     state: state || 'default-state',

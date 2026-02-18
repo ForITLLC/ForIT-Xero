@@ -70,6 +70,7 @@ async function getXeroClient(state: string): Promise<XeroClient> {
       'accounting.transactions',
       'accounting.settings',
       'accounting.contacts',
+      'finance.bankstatementsplus.read',
       'offline_access',
     ],
     state,
