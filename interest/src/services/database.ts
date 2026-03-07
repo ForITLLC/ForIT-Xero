@@ -8,7 +8,7 @@ const DB_SERVER = 'forit-saas-sql.database.windows.net';
 const DB_NAME = 'forit-xero-db';
 const DB_USER = 'foritadmin';
 const KEY_VAULT_URL = 'https://forit-saas-kv.vault.azure.net/';
-const PASSWORD_SECRET_NAME = 'SAAS-SQL-PASSWORD';
+const PASSWORD_SECRET_NAME = 'FORIT-SAAS-DB-PASSWORD';
 
 let pool: sql.ConnectionPool | null = null;
 let dbPassword: string | null = null;

@@ -40,7 +40,7 @@ async function setSecret(vaultUrl, secretName, value) {
  */
 function createSaasDbPasswordGetter() {
     const vaultUrl = 'https://forit-saas-kv.vault.azure.net';
-    return () => getSecret(vaultUrl, 'SAAS-SQL-PASSWORD');
+    return () => getSecret(vaultUrl, 'FORIT-SAAS-DB-PASSWORD');
 }
 /**
  * Create a secret getter for a product's Key Vault

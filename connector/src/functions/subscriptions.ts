@@ -26,7 +26,7 @@ async function getDbPool(): Promise<sql.ConnectionPool> {
 
   const credential = new DefaultAzureCredential();
   const client = new SecretClient('https://forit-saas-kv.vault.azure.net', credential);
-  const secret = await client.getSecret('SAAS-SQL-PASSWORD');
+  const secret = await client.getSecret('FORIT-SAAS-DB-PASSWORD');
   const password = secret.value || '';
 
   dbPool = await sql.connect({
