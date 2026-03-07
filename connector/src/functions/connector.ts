@@ -696,6 +696,214 @@ async function createPayment(request: HttpRequest, context: InvocationContext): 
 }
 
 /**
+ * Contractor Balances - Outstanding ACCPAY invoices grouped by contact and currency
+ * Used by treasury to determine what's owed to each contractor
+ */
+async function getContractorBalances(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const auth = await authenticateRequest(request, context);
+    if (!isAuthSuccess(auth)) return auth;
+
+    // Fetch all outstanding ACCPAY invoices (AUTHORISED or SUBMITTED)
+    const allInvoices: Array<{
+      Contact: { ContactID: string; Name: string };
+      AmountDue: number;
+      CurrencyCode: string;
+      InvoiceNumber: string;
+      DueDateString: string;
+      Status: string;
+    }> = [];
+
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      const url = new URL('https://api.xero.com/api.xro/2.0/Invoices');
+      url.searchParams.set('where', 'Type=="ACCPAY"&&(Status=="AUTHORISED"||Status=="SUBMITTED")');
+      url.searchParams.set('page', String(page));
+
+      const response = await fetch(url.toString(), {
+        headers: {
+          'Authorization': `Bearer ${auth.accessToken}`,
+          'Xero-Tenant-Id': auth.tenantId,
+          'Accept': 'application/json',
+        },
+      });
+
+      if (!response.ok) {
+        const error = await response.text();
+        return { status: response.status, jsonBody: { error } };
+      }
+
+      const data = await response.json() as { Invoices: typeof allInvoices };
+      allInvoices.push(...data.Invoices);
+
+      // Xero returns 100 per page; if less, we're done
+      hasMore = data.Invoices.length === 100;
+      page++;
+    }
+
+    // Group by contact + currency
+    const balanceMap = new Map<string, {
+      contactId: string;
+      contactName: string;
+      currency: string;
+      totalOutstanding: number;
+      invoiceCount: number;
+      oldestDueDate: string;
+      invoices: Array<{ number: string; amountDue: number; dueDate: string; status: string }>;
+    }>();
+
+    for (const inv of allInvoices) {
+      const key = `${inv.Contact.ContactID}_${inv.CurrencyCode}`;
+      const existing = balanceMap.get(key);
+
+      const invoiceEntry = {
+        number: inv.InvoiceNumber,
+        amountDue: inv.AmountDue,
+        dueDate: inv.DueDateString,
+        status: inv.Status,
+      };
+
+      if (existing) {
+        existing.totalOutstanding += inv.AmountDue;
+        existing.invoiceCount++;
+        existing.invoices.push(invoiceEntry);
+        if (inv.DueDateString < existing.oldestDueDate) {
+          existing.oldestDueDate = inv.DueDateString;
+        }
+      } else {
+        balanceMap.set(key, {
+          contactId: inv.Contact.ContactID,
+          contactName: inv.Contact.Name,
+          currency: inv.CurrencyCode,
+          totalOutstanding: inv.AmountDue,
+          invoiceCount: 1,
+          oldestDueDate: inv.DueDateString || '',
+          invoices: [invoiceEntry],
+        });
+      }
+    }
+
+    const contractors = Array.from(balanceMap.values())
+      .sort((a, b) => b.totalOutstanding - a.totalOutstanding);
+
+    return {
+      status: 200,
+      jsonBody: {
+        contractors,
+        totalCount: contractors.length,
+        totalUSD: contractors.filter(c => c.currency === 'USD').reduce((sum, c) => sum + c.totalOutstanding, 0),
+        totalCAD: contractors.filter(c => c.currency === 'CAD').reduce((sum, c) => sum + c.totalOutstanding, 0),
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, jsonBody: { error: message } };
+  }
+}
+
+/**
+ * Contact Balance - Outstanding invoices (ACCREC + ACCPAY) for a specific contact
+ * Shows what a contact owes us and what we owe them
+ */
+async function getContactBalance(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const auth = await authenticateRequest(request, context);
+    if (!isAuthSuccess(auth)) return auth;
+
+    const contactId = request.params.contactId;
+    if (!contactId) {
+      return { status: 400, jsonBody: { error: 'Missing contactId' } };
+    }
+
+    // Fetch all outstanding invoices for this contact
+    const url = new URL('https://api.xero.com/api.xro/2.0/Invoices');
+    url.searchParams.set('where', `Contact.ContactID==guid("${contactId}")&&(Status=="AUTHORISED"||Status=="SUBMITTED")`);
+
+    const response = await fetch(url.toString(), {
+      headers: {
+        'Authorization': `Bearer ${auth.accessToken}`,
+        'Xero-Tenant-Id': auth.tenantId,
+        'Accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const error = await response.text();
+      return { status: response.status, jsonBody: { error } };
+    }
+
+    const data = await response.json() as {
+      Invoices: Array<{
+        InvoiceID: string;
+        InvoiceNumber: string;
+        Type: string;
+        Status: string;
+        AmountDue: number;
+        Total: number;
+        AmountPaid: number;
+        CurrencyCode: string;
+        DueDateString: string;
+        DateString: string;
+        Reference: string;
+        Contact: { ContactID: string; Name: string };
+      }>;
+    };
+
+    const receivable = data.Invoices.filter(i => i.Type === 'ACCREC');
+    const payable = data.Invoices.filter(i => i.Type === 'ACCPAY');
+
+    const sumByCurrency = (invoices: typeof data.Invoices) => {
+      const sums: Record<string, number> = {};
+      for (const inv of invoices) {
+        sums[inv.CurrencyCode] = (sums[inv.CurrencyCode] || 0) + inv.AmountDue;
+      }
+      return sums;
+    };
+
+    return {
+      status: 200,
+      jsonBody: {
+        contactId,
+        contactName: data.Invoices[0]?.Contact?.Name || '',
+        receivable: {
+          invoices: receivable.map(i => ({
+            invoiceId: i.InvoiceID,
+            number: i.InvoiceNumber,
+            amountDue: i.AmountDue,
+            total: i.Total,
+            currency: i.CurrencyCode,
+            dueDate: i.DueDateString,
+            date: i.DateString,
+            reference: i.Reference,
+          })),
+          totalsByCurrency: sumByCurrency(receivable),
+          count: receivable.length,
+        },
+        payable: {
+          invoices: payable.map(i => ({
+            invoiceId: i.InvoiceID,
+            number: i.InvoiceNumber,
+            amountDue: i.AmountDue,
+            total: i.Total,
+            currency: i.CurrencyCode,
+            dueDate: i.DueDateString,
+            date: i.DateString,
+            reference: i.Reference,
+          })),
+          totalsByCurrency: sumByCurrency(payable),
+          count: payable.length,
+        },
+      },
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { status: 500, jsonBody: { error: message } };
+  }
+}
+
+/**
  * Serve OpenAPI/Swagger definition for Power Automate
  */
 async function getApiDefinition(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -819,6 +1027,23 @@ async function getApiDefinition(request: HttpRequest, context: InvocationContext
           responses: { '200': { description: 'Updated invoice' } },
         },
       },
+      '/contractor-balances': {
+        get: {
+          operationId: 'GetContractorBalances',
+          summary: 'Get outstanding balances owed to contractors',
+          description: 'Returns all outstanding ACCPAY invoices grouped by contact and currency. Used by treasury to determine payout amounts.',
+          responses: { '200': { description: 'Contractor balance summary' } },
+        },
+      },
+      '/contacts/{contactId}/balance': {
+        get: {
+          operationId: 'GetContactBalance',
+          summary: 'Get full balance for a specific contact',
+          description: 'Returns both receivable (what they owe us) and payable (what we owe them) outstanding invoices for a contact.',
+          parameters: [{ name: 'contactId', in: 'path', required: true, type: 'string', description: 'Xero Contact ID' }],
+          responses: { '200': { description: 'Contact balance details' } },
+        },
+      },
       '/payments/{paymentId}': {
         delete: {
           operationId: 'DeletePayment',
@@ -933,6 +1158,20 @@ app.http('ConnectorCreateInvoice', {
   authLevel: 'anonymous',
   route: 'connector/invoices',
   handler: createInvoice,
+});
+
+app.http('ConnectorGetContractorBalances', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'connector/contractor-balances',
+  handler: getContractorBalances,
+});
+
+app.http('ConnectorGetContactBalance', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'connector/contacts/{contactId}/balance',
+  handler: getContactBalance,
 });
 
 /**
