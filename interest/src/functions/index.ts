@@ -14,7 +14,6 @@ import './searchContacts';
 import './debugInvoices';
 import './listInterestInvoices';
 import './compareInterest';
-import './mcpAuth';
 import './voidInvoices';
 import './debugVoided';
 import './deleteInvoice';
