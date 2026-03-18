@@ -4,9 +4,9 @@ import * as sql from 'mssql';
 import { InterestConfig, InterestLedgerEntry } from '../types';
 
 // Database configuration
-const DB_SERVER = 'forit-saas-sql.database.windows.net';
-const DB_NAME = 'forit-xero-db';
-const DB_USER = 'foritadmin';
+const DB_SERVER = process.env.SQL_SERVER || 'forit-saas-sql.database.windows.net';
+const DB_NAME = process.env.SQL_DATABASE || 'forit';
+const DB_USER = process.env.SQL_USER || 'foritadmin';
 const KEY_VAULT_URL = 'https://forit-saas-kv.vault.azure.net/';
 const PASSWORD_SECRET_NAME = 'FORIT-SAAS-DB-PASSWORD';
 
@@ -96,7 +96,7 @@ export async function getActiveConfigs(): Promise<InterestConfig[]> {
       last_run_date,
       last_invoice_id,
       notes
-    FROM interest_configs
+    FROM xero.interest_configs
     WHERE is_active = 1
   `);
 
@@ -124,7 +124,7 @@ export async function getConfigByContactId(contactId: string): Promise<InterestC
         last_run_date,
         last_invoice_id,
         notes
-      FROM interest_configs
+      FROM xero.interest_configs
       WHERE xero_contact_id = @contactId
     `);
 
@@ -146,7 +146,7 @@ export async function updateConfigLastRun(
     .input('lastRunDate', sql.DateTime2, lastRunDate)
     .input('lastInvoiceId', sql.NVarChar, lastInvoiceId)
     .query(`
-      UPDATE interest_configs
+      UPDATE xero.interest_configs
       SET last_run_date = @lastRunDate,
           last_invoice_id = @lastInvoiceId
       WHERE id = @configId
@@ -167,7 +167,7 @@ export async function getLedgerEntriesByContact(contactId: string): Promise<Inte
     .input('contactId', sql.NVarChar, contactId)
     .query(`
       SELECT *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE contact_id = @contactId
       ORDER BY created DESC
     `);
@@ -185,7 +185,7 @@ export async function getLedgerEntriesBySourceInvoice(sourceInvoiceId: string): 
     .input('sourceInvoiceId', sql.NVarChar, sourceInvoiceId)
     .query(`
       SELECT *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE source_invoice_id = @sourceInvoiceId
       ORDER BY created DESC
     `);
@@ -201,7 +201,7 @@ export async function getActiveLedgerEntries(): Promise<InterestLedgerEntry[]> {
 
   const result = await db.request().query(`
     SELECT *
-    FROM interest_ledger
+    FROM xero.interest_ledger
     WHERE action != 'Credited'
     ORDER BY created DESC
   `);
@@ -236,7 +236,7 @@ export async function createLedgerEntry(entry: Omit<InterestLedgerEntry, 'id' | 
     .input('contactName', sql.NVarChar, entry.contactName)
     .input('notes', sql.NVarChar, entry.notes || null)
     .query(`
-      INSERT INTO interest_ledger (
+      INSERT INTO xero.interest_ledger (
         source_invoice_id,
         source_invoice_number,
         interest_invoice_id,
@@ -294,7 +294,7 @@ export async function getLatestLedgerEntryForInvoice(sourceInvoiceId: string): P
     .input('sourceInvoiceId', sql.NVarChar, sourceInvoiceId)
     .query(`
       SELECT TOP 1 *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE source_invoice_id = @sourceInvoiceId
       ORDER BY created DESC
     `);
@@ -322,7 +322,7 @@ export async function getLedgerEntry(entryId: string): Promise<InterestLedgerEnt
     .input('entryId', sql.Int, parseInt(entryId, 10))
     .query(`
       SELECT *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE id = @entryId
     `);
 
@@ -343,7 +343,7 @@ export async function getLedgerEntriesForMonth(
     .input('chargeMonth', sql.NVarChar, chargeMonth)
     .query(`
       SELECT *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE source_invoice_id = @sourceInvoiceId
         AND charge_month = @chargeMonth
       ORDER BY created DESC
@@ -377,7 +377,7 @@ export async function getLatestLedgerEntryForMonth(
     .input('chargeMonth', sql.NVarChar, chargeMonth)
     .query(`
       SELECT TOP 1 *
-      FROM interest_ledger
+      FROM xero.interest_ledger
       WHERE source_invoice_id = @sourceInvoiceId
         AND charge_month = @chargeMonth
       ORDER BY created DESC
@@ -394,7 +394,7 @@ export async function getAllLedgerEntries(): Promise<InterestLedgerEntry[]> {
 
   const result = await db.request().query(`
     SELECT *
-    FROM interest_ledger
+    FROM xero.interest_ledger
     ORDER BY created DESC
   `);
 
@@ -410,7 +410,7 @@ export async function deleteLedgerEntry(entryId: string): Promise<void> {
   await db.request()
     .input('entryId', sql.Int, parseInt(entryId, 10))
     .query(`
-      DELETE FROM interest_ledger
+      DELETE FROM xero.interest_ledger
       WHERE id = @entryId
     `);
 }

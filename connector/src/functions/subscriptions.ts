@@ -31,7 +31,7 @@ async function getDbPool(): Promise<sql.ConnectionPool> {
 
   dbPool = await sql.connect({
     server: process.env.SAAS_DB_SERVER || 'forit-saas-sql.database.windows.net',
-    database: 'forit-saas-db',
+    database: process.env.SAAS_DB_NAME || 'forit',
     user: process.env.SAAS_DB_USER || 'foritadmin',
     password,
     options: {

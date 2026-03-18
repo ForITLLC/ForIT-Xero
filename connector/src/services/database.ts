@@ -40,7 +40,7 @@ export interface XeroConnection {
   updated_at: Date;
 }
 
-// Single database pool for all tables (consolidated in forit-saas-db)
+// Single database pool for all tables (consolidated in forit database)
 let dbPool: sql.ConnectionPool | null = null;
 
 async function getDbPassword(): Promise<string> {
@@ -50,7 +50,7 @@ async function getDbPassword(): Promise<string> {
   return secret.value || '';
 }
 
-// Unified pool for forit-saas-db (all tables: customers, api_keys, products, xero_connections, etc.)
+// Unified pool for forit database (all tables use schema prefixes)
 async function getDbPool(): Promise<sql.ConnectionPool> {
   if (dbPool) return dbPool;
 
@@ -58,7 +58,7 @@ async function getDbPool(): Promise<sql.ConnectionPool> {
 
   dbPool = await sql.connect({
     server: process.env.SAAS_DB_SERVER || 'forit-saas-sql.database.windows.net',
-    database: 'forit-saas-db',
+    database: process.env.SAAS_DB_NAME || 'forit',
     user: process.env.SAAS_DB_USER || 'foritadmin',
     password,
     options: {
