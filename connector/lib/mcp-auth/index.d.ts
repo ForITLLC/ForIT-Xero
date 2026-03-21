@@ -12,7 +12,7 @@
  * initDatabase({
  *   server: 'forit-saas-sql.database.windows.net',
  *   database: 'forit-saas-db',
- *   user: 'foritadmin',
+ *   user: 'xero_svc',
  *   getPassword: createSaasDbPasswordGetter(),
  * });
  *
