@@ -82,7 +82,7 @@ export async function createCustomer(email: string, companyName?: string, firstN
     .input('first_name', sql.NVarChar, firstName || null)
     .input('last_name', sql.NVarChar, lastName || null)
     .query(`
-      INSERT INTO customers (email, company_name, first_name, last_name)
+      INSERT INTO xero.customers (email, company_name, first_name, last_name)
       OUTPUT INSERTED.*
       VALUES (@email, @company_name, @first_name, @last_name)
     `);
@@ -93,7 +93,7 @@ export async function getCustomerByEmail(email: string): Promise<Customer | null
   const db = await getSaasPool();
   const result = await db.request()
     .input('email', sql.NVarChar, email)
-    .query('SELECT * FROM customers WHERE email = @email');
+    .query('SELECT * FROM xero.customers WHERE email = @email');
   return result.recordset[0] || null;
 }
 
@@ -101,7 +101,7 @@ export async function getCustomerById(id: string): Promise<Customer | null> {
   const db = await getSaasPool();
   const result = await db.request()
     .input('id', sql.UniqueIdentifier, id)
-    .query('SELECT * FROM customers WHERE id = @id');
+    .query('SELECT * FROM xero.customers WHERE id = @id');
   return result.recordset[0] || null;
 }
 
@@ -124,7 +124,7 @@ export async function createApiKey(customerId: string, name = 'Default'): Promis
     .input('key_prefix', sql.NVarChar, prefix)
     .input('name', sql.NVarChar, name)
     .query(`
-      INSERT INTO api_keys (customer_id, key_hash, key_prefix, name)
+      INSERT INTO xero.api_keys (customer_id, key_hash, key_prefix, name)
       OUTPUT INSERTED.*
       VALUES (@customer_id, @key_hash, @key_prefix, @name)
     `);
@@ -139,8 +139,8 @@ export async function validateApiKey(key: string): Promise<Customer | null> {
   const result = await db.request()
     .input('key_hash', sql.NVarChar, hash)
     .query(`
-      SELECT c.* FROM customers c
-      JOIN api_keys ak ON c.id = ak.customer_id
+      SELECT c.* FROM xero.customers c
+      JOIN xero.api_keys ak ON c.id = ak.customer_id
       WHERE ak.key_hash = @key_hash AND ak.is_active = 1
     `);
 
@@ -148,7 +148,7 @@ export async function validateApiKey(key: string): Promise<Customer | null> {
     // Update last_used_at
     await db.request()
       .input('key_hash', sql.NVarChar, hash)
-      .query('UPDATE api_keys SET last_used_at = GETUTCDATE() WHERE key_hash = @key_hash');
+      .query('UPDATE xero.api_keys SET last_used_at = GETUTCDATE() WHERE key_hash = @key_hash');
   }
 
   return result.recordset[0] || null;
@@ -174,7 +174,7 @@ export async function saveXeroConnection(
     .input('refresh_token', sql.NVarChar(sql.MAX), refreshToken)
     .input('expires_at', sql.BigInt, expiresAt)
     .query(`
-      MERGE xero_connections AS target
+      MERGE xero.xero_connections AS target
       USING (SELECT @customer_id as customer_id, @tenant_id as tenant_id) AS source
       ON target.customer_id = source.customer_id AND target.tenant_id = source.tenant_id
       WHEN MATCHED THEN
@@ -197,7 +197,7 @@ export async function getXeroConnection(customerId: string): Promise<XeroConnect
   const db = await getDbPool();
   const result = await db.request()
     .input('customer_id', sql.UniqueIdentifier, customerId)
-    .query('SELECT * FROM xero_connections WHERE customer_id = @customer_id');
+    .query('SELECT * FROM xero.xero_connections WHERE customer_id = @customer_id');
   return result.recordset[0] || null;
 }
 
@@ -214,7 +214,7 @@ export async function updateXeroTokens(
     .input('refresh_token', sql.NVarChar(sql.MAX), refreshToken)
     .input('expires_at', sql.BigInt, expiresAt)
     .query(`
-      UPDATE xero_connections
+      UPDATE xero.xero_connections
       SET access_token = @access_token,
           refresh_token = @refresh_token,
           expires_at = @expires_at,
@@ -229,7 +229,7 @@ export async function deleteXeroConnection(customerId: string, connectionId: str
     .input('id', sql.UniqueIdentifier, connectionId)
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .query(`
-      DELETE FROM xero_connections
+      DELETE FROM xero.xero_connections
       WHERE id = @id AND customer_id = @customer_id
     `);
   return result.rowsAffected[0] > 0;
@@ -239,7 +239,7 @@ export async function getXeroConnectionsByCustomer(customerId: string): Promise<
   const db = await getDbPool();
   const result = await db.request()
     .input('customer_id', sql.UniqueIdentifier, customerId)
-    .query('SELECT * FROM xero_connections WHERE customer_id = @customer_id ORDER BY created_at DESC');
+    .query('SELECT * FROM xero.xero_connections WHERE customer_id = @customer_id ORDER BY created_at DESC');
   return result.recordset || [];
 }
 
@@ -250,11 +250,11 @@ export async function grantProductAccess(customerId: string, productSlug: string
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .input('product_slug', sql.NVarChar, productSlug)
     .query(`
-      INSERT INTO customer_products (customer_id, product_id, status)
+      INSERT INTO xero.customer_products (customer_id, product_id, status)
       SELECT @customer_id, p.id, 'trial'
-      FROM products p WHERE p.slug = @product_slug
+      FROM xero.products p WHERE p.slug = @product_slug
       AND NOT EXISTS (
-        SELECT 1 FROM customer_products cp
+        SELECT 1 FROM xero.customer_products cp
         WHERE cp.customer_id = @customer_id AND cp.product_id = p.id
       )
     `);
@@ -266,8 +266,8 @@ export async function checkProductAccess(customerId: string, productSlug: string
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .input('product_slug', sql.NVarChar, productSlug)
     .query(`
-      SELECT 1 FROM customer_products cp
-      JOIN products p ON cp.product_id = p.id
+      SELECT 1 FROM xero.customer_products cp
+      JOIN xero.products p ON cp.product_id = p.id
       WHERE cp.customer_id = @customer_id
         AND p.slug = @product_slug
         AND cp.status IN ('trial', 'active')
@@ -280,8 +280,8 @@ export async function hasAnyProductAccess(customerId: string): Promise<boolean> 
   const result = await db.request()
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .query(`
-      SELECT 1 FROM customer_products cp
-      JOIN products p ON cp.product_id = p.id
+      SELECT 1 FROM xero.customer_products cp
+      JOIN xero.products p ON cp.product_id = p.id
       WHERE cp.customer_id = @customer_id
         AND cp.status IN ('trial', 'active')
         AND p.status = 'active'
@@ -303,7 +303,7 @@ export async function getActiveProducts(): Promise<Product[]> {
   const db = await getSaasPool();
   const result = await db.request().query(`
     SELECT id, name, slug, description, status, is_active
-    FROM products
+    FROM xero.products
     WHERE is_active = 1
     ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, name
   `);
@@ -314,7 +314,7 @@ export async function getProductBySlug(slug: string): Promise<Product | null> {
   const db = await getSaasPool();
   const result = await db.request()
     .input('slug', sql.NVarChar, slug)
-    .query('SELECT * FROM products WHERE slug = @slug');
+    .query('SELECT * FROM xero.products WHERE slug = @slug');
   return result.recordset[0] || null;
 }
 
@@ -332,8 +332,8 @@ export async function registerProductInterest(
     .input('name', sql.NVarChar, name || null)
     .input('company', sql.NVarChar, company || null)
     .query(`
-      IF NOT EXISTS (SELECT 1 FROM product_interest WHERE product_id = @product_id AND email = @email)
-      INSERT INTO product_interest (product_id, email, name, company)
+      IF NOT EXISTS (SELECT 1 FROM xero.product_interest WHERE product_id = @product_id AND email = @email)
+      INSERT INTO xero.product_interest (product_id, email, name, company)
       VALUES (@product_id, @email, @name, @company)
     `);
 }
@@ -362,7 +362,7 @@ export interface ProductPage {
 export async function getPublishedProductPages(): Promise<ProductPage[]> {
   const db = await getSaasPool();
   const result = await db.request().query(`
-    SELECT * FROM product_pages
+    SELECT * FROM xero.product_pages
     WHERE published = 1
     ORDER BY sort_order, title
   `);
@@ -373,14 +373,14 @@ export async function getProductPageBySlug(slug: string): Promise<ProductPage | 
   const db = await getSaasPool();
   const result = await db.request()
     .input('slug', sql.NVarChar, slug)
-    .query('SELECT * FROM product_pages WHERE slug = @slug AND published = 1');
+    .query('SELECT * FROM xero.product_pages WHERE slug = @slug AND published = 1');
   return result.recordset[0] ? parseProductPage(result.recordset[0]) : null;
 }
 
 export async function getAllProductPageSlugs(): Promise<string[]> {
   const db = await getSaasPool();
   const result = await db.request().query(`
-    SELECT slug FROM product_pages WHERE published = 1
+    SELECT slug FROM xero.product_pages WHERE published = 1
   `);
   return result.recordset.map((r: { slug: string }) => r.slug);
 }
@@ -476,7 +476,7 @@ export interface SwagOrderItem {
 export async function getPublishedSwagProducts(): Promise<SwagProduct[]> {
   const db = await getSaasPool();
   const result = await db.request().query(`
-    SELECT * FROM swag_products
+    SELECT * FROM xero.swag_products
     WHERE published = 1
     ORDER BY featured DESC, sort_order, name
   `);
@@ -489,7 +489,7 @@ export async function getSwagProductBySlug(slug: string): Promise<SwagProductWit
 
   const productResult = await db.request()
     .input('slug', sql.NVarChar, slug)
-    .query('SELECT * FROM swag_products WHERE slug = @slug AND published = 1');
+    .query('SELECT * FROM xero.swag_products WHERE slug = @slug AND published = 1');
 
   if (!productResult.recordset[0]) return null;
 
@@ -498,7 +498,7 @@ export async function getSwagProductBySlug(slug: string): Promise<SwagProductWit
   const variantsResult = await db.request()
     .input('product_id', sql.UniqueIdentifier, product.id)
     .query(`
-      SELECT * FROM swag_variants
+      SELECT * FROM xero.swag_variants
       WHERE product_id = @product_id AND is_active = 1
       ORDER BY sort_order, name
     `);
@@ -514,7 +514,7 @@ export async function getSwagVariantBySku(sku: string): Promise<SwagVariant | nu
   const db = await getSaasPool();
   const result = await db.request()
     .input('sku', sql.NVarChar, sku)
-    .query('SELECT * FROM swag_variants WHERE sku = @sku AND is_active = 1');
+    .query('SELECT * FROM xero.swag_variants WHERE sku = @sku AND is_active = 1');
   return result.recordset[0] ? parseSwagVariant(result.recordset[0]) : null;
 }
 
@@ -523,7 +523,7 @@ export async function getSwagProductById(id: string): Promise<SwagProduct | null
   const db = await getSaasPool();
   const result = await db.request()
     .input('id', sql.UniqueIdentifier, id)
-    .query('SELECT * FROM swag_products WHERE id = @id');
+    .query('SELECT * FROM xero.swag_products WHERE id = @id');
   return result.recordset[0] ? parseSwagProduct(result.recordset[0]) : null;
 }
 
@@ -568,7 +568,7 @@ export async function createSwagOrder(input: CreateSwagOrderInput): Promise<Swag
     .input('total_cents', sql.Int, input.total_cents)
     .input('stripe_checkout_session_id', sql.NVarChar, input.stripe_checkout_session_id || null)
     .query(`
-      INSERT INTO swag_orders (
+      INSERT INTO xero.swag_orders (
         customer_id, email, ship_name, ship_address1, ship_address2,
         ship_city, ship_state, ship_zip, ship_country, ship_phone,
         subtotal_cents, shipping_cents, tax_cents, total_cents,
@@ -592,8 +592,8 @@ export async function createSwagOrder(input: CreateSwagOrderInput): Promise<Swag
       .input('variant_id', sql.UniqueIdentifier, item.variant_id)
       .query(`
         SELECT v.*, p.name as product_name
-        FROM swag_variants v
-        JOIN swag_products p ON v.product_id = p.id
+        FROM xero.swag_variants v
+        JOIN xero.swag_products p ON v.product_id = p.id
         WHERE v.id = @variant_id
       `);
 
@@ -609,7 +609,7 @@ export async function createSwagOrder(input: CreateSwagOrderInput): Promise<Swag
         .input('unit_price_cents', sql.Int, item.unit_price_cents)
         .input('total_cents', sql.Int, item.quantity * item.unit_price_cents)
         .query(`
-          INSERT INTO swag_order_items (
+          INSERT INTO xero.swag_order_items (
             order_id, variant_id, product_name, variant_name, sku,
             quantity, unit_price_cents, total_cents
           )
@@ -634,7 +634,7 @@ export async function updateSwagOrderPayment(
     .input('id', sql.UniqueIdentifier, orderId)
     .input('stripe_payment_intent_id', sql.NVarChar, stripePaymentIntentId)
     .query(`
-      UPDATE swag_orders
+      UPDATE xero.swag_orders
       SET stripe_payment_intent_id = @stripe_payment_intent_id,
           status = 'paid',
           paid_at = GETUTCDATE(),
@@ -655,7 +655,7 @@ export async function updateSwagOrderPrintful(
     .input('printful_order_id', sql.BigInt, printfulOrderId)
     .input('printful_order_status', sql.NVarChar, printfulStatus)
     .query(`
-      UPDATE swag_orders
+      UPDATE xero.swag_orders
       SET printful_order_id = @printful_order_id,
           printful_order_status = @printful_order_status,
           status = 'processing',
@@ -678,7 +678,7 @@ export async function updateSwagOrderShipping(
     .input('tracking_url', sql.NVarChar, trackingUrl)
     .input('carrier', sql.NVarChar, carrier)
     .query(`
-      UPDATE swag_orders
+      UPDATE xero.swag_orders
       SET tracking_number = @tracking_number,
           tracking_url = @tracking_url,
           carrier = @carrier,
@@ -694,7 +694,7 @@ export async function getSwagOrderById(orderId: string): Promise<SwagOrder | nul
   const db = await getSaasPool();
   const result = await db.request()
     .input('id', sql.UniqueIdentifier, orderId)
-    .query('SELECT * FROM swag_orders WHERE id = @id');
+    .query('SELECT * FROM xero.swag_orders WHERE id = @id');
   return result.recordset[0] || null;
 }
 
@@ -703,7 +703,7 @@ export async function getSwagOrderByStripeSession(sessionId: string): Promise<Sw
   const db = await getSaasPool();
   const result = await db.request()
     .input('session_id', sql.NVarChar, sessionId)
-    .query('SELECT * FROM swag_orders WHERE stripe_checkout_session_id = @session_id');
+    .query('SELECT * FROM xero.swag_orders WHERE stripe_checkout_session_id = @session_id');
   return result.recordset[0] || null;
 }
 
@@ -712,7 +712,7 @@ export async function getSwagOrderItems(orderId: string): Promise<SwagOrderItem[
   const db = await getSaasPool();
   const result = await db.request()
     .input('order_id', sql.UniqueIdentifier, orderId)
-    .query('SELECT * FROM swag_order_items WHERE order_id = @order_id');
+    .query('SELECT * FROM xero.swag_order_items WHERE order_id = @order_id');
   return result.recordset;
 }
 

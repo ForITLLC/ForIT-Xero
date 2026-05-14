@@ -58,7 +58,7 @@ async function getProductBySlugWithStripe(slug: string): Promise<ProductWithStri
   const db = await getDbPool();
   const result = await db.request()
     .input('slug', sql.NVarChar, slug)
-    .query('SELECT id, name, slug, stripe_price_id, stripe_product_id FROM products WHERE slug = @slug AND is_active = 1');
+    .query('SELECT id, name, slug, stripe_price_id, stripe_product_id FROM xero.products WHERE slug = @slug AND is_active = 1');
   return result.recordset[0] || null;
 }
 
@@ -72,7 +72,7 @@ async function getOrCreateStripeCustomer(customerId: string): Promise<string> {
   // Check if customer already has a Stripe ID
   const customerResult = await db.request()
     .input('id', sql.UniqueIdentifier, customerId)
-    .query('SELECT id, email, stripe_customer_id, company_name, first_name, last_name FROM customers WHERE id = @id');
+    .query('SELECT id, email, stripe_customer_id, company_name, first_name, last_name FROM xero.customers WHERE id = @id');
 
   const customer = customerResult.recordset[0];
   if (!customer) {
@@ -96,7 +96,7 @@ async function getOrCreateStripeCustomer(customerId: string): Promise<string> {
   await db.request()
     .input('id', sql.UniqueIdentifier, customerId)
     .input('stripe_customer_id', sql.NVarChar, stripeCustomer.id)
-    .query('UPDATE customers SET stripe_customer_id = @stripe_customer_id, updated_at = GETUTCDATE() WHERE id = @id');
+    .query('UPDATE xero.customers SET stripe_customer_id = @stripe_customer_id, updated_at = GETUTCDATE() WHERE id = @id');
 
   return stripeCustomer.id;
 }
@@ -123,7 +123,7 @@ async function updateCustomerProductSubscription(
     .input('starts_at', sql.DateTime2, startsAt)
     .input('ends_at', sql.DateTime2, endsAt)
     .query(`
-      MERGE customer_products AS target
+      MERGE xero.customer_products AS target
       USING (SELECT @customer_id as customer_id, @product_id as product_id) AS source
       ON target.customer_id = source.customer_id AND target.product_id = source.product_id
       WHEN MATCHED THEN
@@ -146,7 +146,7 @@ async function getCustomerProductBySubscription(stripeSubscriptionId: string): P
   const db = await getDbPool();
   const result = await db.request()
     .input('stripe_subscription_id', sql.NVarChar, stripeSubscriptionId)
-    .query('SELECT customer_id, product_id FROM customer_products WHERE stripe_subscription_id = @stripe_subscription_id');
+    .query('SELECT customer_id, product_id FROM xero.customer_products WHERE stripe_subscription_id = @stripe_subscription_id');
   return result.recordset[0] || null;
 }
 
@@ -157,7 +157,7 @@ async function getProductByStripePrice(stripePriceId: string): Promise<string | 
   const db = await getDbPool();
   const result = await db.request()
     .input('stripe_price_id', sql.NVarChar, stripePriceId)
-    .query('SELECT id FROM products WHERE stripe_price_id = @stripe_price_id');
+    .query('SELECT id FROM xero.products WHERE stripe_price_id = @stripe_price_id');
   return result.recordset[0]?.id || null;
 }
 
