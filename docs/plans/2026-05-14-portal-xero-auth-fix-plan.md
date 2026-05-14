@@ -30,67 +30,106 @@ user     = SAAS_DB_USER   || 'xero_svc'
 password = Key Vault: FORIT-SAAS-DB-PASSWORD
 ```
 
-## Root-cause chain (with commit evidence)
+## Root cause (PROVEN via direct DB inspection 2026-05-14)
 
-| Commit | Change | Risk introduced |
-|---|---|---|
-| `9b70876` Mar 18 | DB migration: `forit-saas-db` → `forit` consolidated DB | If `customers/api_keys/products/xero_connections` weren't moved, every lookup 500s |
-| `eb94b01` Mar 19 | Renamed `xero` schema → `finance` | Only touches interest-side tables. Customers prob still in `dbo`. Probably orthogonal. |
-| `126d416` Mar 21 | `foritadmin` → `xero_svc` (least-privilege account) | If `xero_svc` lacks SELECT on `dbo.customers`, Azure SQL returns "Invalid object name" verbatim — same error as a missing table, due to [metadata visibility behavior](https://learn.microsoft.com/sql/relational-databases/security/metadata-visibility-configuration). |
+Connected to `forit` DB as `foritadmin`. Findings:
 
-**Primary hypothesis:** commit `126d416` created `xero_svc` but the GRANT statements either (a) weren't run on the consolidated `forit` DB or (b) were scoped only to the `finance` schema, not `dbo.customers`/`dbo.api_keys`/`dbo.products`/`dbo.xero_connections`.
+1. **`dbo.customers` does not exist.** Nothing named `customers` in `dbo`. No view either (`dbo` has zero views).
+2. **The customers table is `quoting.Customers`** — different schema, capitalised, **and the columns don't match the connector's queries:**
+   - Connector expects: `id`, `email`, `stripe_customer_id`, `company_name`, `first_name`, `last_name`
+   - Actual `quoting.Customers`: `id`, `tenant_id`, `company_id`, `first_name`, `last_name`, `email`, `phone`, `created_at`, `lifecycle_stage`, `notes`, `last_activity_at`
+   - Missing: `stripe_customer_id`, `company_name`. Different columns: `tenant_id`/`company_id` instead.
+3. **The api_keys table is `support.api_keys`** with a completely different identity model:
+   - Connector expects: `id`, `customer_id`, `key_hash`, `key_prefix`, `name`
+   - Actual `support.api_keys`: `key_id`, `user_id` (uniqueidentifier), `name`, `key_hash`, `key_prefix`, `scopes`, `created_at`, `last_used_at`, `revoked_at`
+   - The FK points to a *user* (Entra ID), not a *customer*. Different domain model.
+4. **`products` is `store.products`.** Schema mismatch.
+5. **`xero_connections` is `xero.xero_connections`** — the schema rename `xero → finance` (commit `eb94b01`) never moved this table. `finance.xero_connections` does NOT exist; `xero.xero_connections` still does.
+6. **`xero_svc` SQL user does not exist** in the `forit` DB. The principal listing shows `crm_svc, dolores, finance_app, forms_app, hr_app, issuelog_svc, proposals_app, quote_bot_svc, support_app, website_app, forit-planner-sync` — no `xero_svc`. So commit `126d416` changed the *code default* but the user was never provisioned.
+7. **Old `forit-saas-db` database is gone.** `sys.databases` on the server: `cayres, forit, great-north, master, sign`. No fallback DB.
 
-**Secondary hypothesis:** commit `9b70876` migrated the database default but the actual tables in `forit` are under a non-default schema (e.g. `saas.customers`) and the bare `FROM customers` no longer resolves for `xero_svc`'s default schema.
+### What this means
 
-Both produce identical error text. Distinguishing them requires DB access.
+The connector's data-access layer is **fundamentally out of sync** with the consolidated DB. The three migration commits in this repo (`9b70876`, `eb94b01`, `126d416`) changed surface config — connection strings, user defaults, schema name in one module — but did **not** update queries to match the consolidated DB's actual schema layout (`quoting.Customers`, `support.api_keys`, `store.products`, `xero.xero_connections`) nor the new column/identity model.
 
-## Fix options
+Worse, the new data model in `forit` is **not equivalent** to the old `forit-saas-db.dbo.customers`/`dbo.api_keys`. `support.api_keys` is keyed on Entra user_id (uniqueidentifier), not customer_id (int). The connector's "customer → api_keys → xero_connections" chain doesn't map to "user → api_keys + ???.xero_connections" without semantic loss.
 
-### Option A — Restore permissions on `xero_svc`, keep least-privilege design (RECOMMENDED)
+The portal currently can't reauth Xero, and the in-session MCP `xero` tool's auth path through this connector is silently dead too.
 
-1. Connect to `forit-saas-sql.database.windows.net` / DB `forit` as admin.
-2. Run, idempotent:
+## Fix options (revised after DB inspection)
+
+The original options (A: GRANT, B: revert user, C: roll back consolidation) were based on the assumption that the tables exist at `dbo.*` and only permissions or DB choice were wrong. That assumption is **false**. Real options below.
+
+### Option 1 — Compatibility views in `dbo` + new `xero_svc` user (LOWEST CHANGE)
+
+Create `dbo.customers`, `dbo.api_keys`, `dbo.products`, `dbo.xero_connections` as **views** mapping the connector's expected shape onto the actual schemas. Missing columns get `NULL` literals.
+
+```sql
+CREATE OR ALTER VIEW dbo.customers AS
+SELECT id, email, first_name, last_name,
+       CAST(NULL AS nvarchar(255)) AS stripe_customer_id,
+       CAST(NULL AS nvarchar(255)) AS company_name
+FROM quoting.Customers;
+
+-- support.api_keys uses user_id (uniqueidentifier) not customer_id (int).
+-- The join keys don't line up — a view here would lie.
+-- This is the fundamental mismatch we cannot paper over.
+```
+
+**Pros:** Minimal code change; deploy resumes working as soon as views land.
+**Cons:** The `api_keys` and `customers` are joined on `customer_id` (int). `support.api_keys.user_id` is a uniqueidentifier. **No SQL view can bridge that join.** So this option works for `products` and possibly read-only `customers`, but **NOT for the api_keys lookup that's actually 500ing**.
+**Verdict:** Doesn't actually fix the failing endpoint. Reject.
+
+### Option 2 — Rewrite connector auth to use `support.api_keys` directly (RECOMMENDED — right architecture)
+
+The consolidated DB already has an api_keys system (`support.api_keys` → Entra user_id). The forit-Website portal already issues these. Switch the connector to validate `x-api-key` against `support.api_keys` and identify the caller as a *user*, not a *customer*. Drop the local `customers/api_keys/products` tables from this connector's worldview entirely.
+
+Concrete changes:
+1. New `connector/src/services/auth.ts` that does:
    ```sql
-   GRANT SELECT, INSERT, UPDATE ON dbo.customers       TO xero_svc;
-   GRANT SELECT, INSERT, UPDATE ON dbo.api_keys        TO xero_svc;
-   GRANT SELECT                  ON dbo.products       TO xero_svc;
-   GRANT SELECT, INSERT, UPDATE, DELETE ON dbo.xero_connections TO xero_svc;
-   GRANT SELECT, INSERT, UPDATE  ON dbo.customer_products TO xero_svc;
+   SELECT user_id, scopes, revoked_at FROM support.api_keys
+   WHERE key_hash = @hash AND revoked_at IS NULL
    ```
-3. Commit the GRANT script to `connector/sql/005-grant-xero_svc.sql` so it's checked in, repeatable, and not lost when somebody recreates the DB.
-4. Re-curl `https://xero.forit.io/api/tokens` — expect 401 (invalid key), not 500 (broken query). 401 = the lookup succeeded and rejected an unknown key.
+2. Replace all `customers`/`api_keys` references in `connector/src/services/database.ts` and `connector/src/functions/subscriptions.ts` with the new auth service.
+3. The `xero_connections` table stays where it is (`xero.xero_connections`); update queries to use full schema name (or rename to `finance.xero_connections` to match the design-intent rename and update queries).
+4. Create the `xero_svc` SQL user with grants:
+   ```sql
+   CREATE USER xero_svc FROM LOGIN xero_svc;  -- assumes login exists at server level
+   GRANT SELECT ON support.api_keys TO xero_svc;
+   GRANT SELECT, INSERT, UPDATE, DELETE ON xero.xero_connections TO xero_svc;
+   ```
+5. Check in as `connector/sql/005-create-xero_svc.sql` and `006-grant-xero_svc.sql`. Idempotent.
+6. Rebuild + redeploy connector.
 
-**Pros:** Preserves the security improvement from commit `126d416`. Minimal code change. Idempotent migration script lives in source.
-**Cons:** Requires (a) confirming the tables actually exist in `dbo.*` of the `forit` DB, (b) admin access to grant.
+**Pros:** Right architecture. Aligned with how the consolidated platform issues api_keys. Removes a redundant identity store. Least-privilege preserved.
+**Cons:** Real code change (1-2 hours). Need to confirm whether existing portal-issued api_keys for Xero use `support.api_keys` already (likely yes since the portal owns that table).
+**Open question for Ben:** does the portal's "ForIT-Xero Connector" product issue keys into `support.api_keys`? If yes → straight rewrite. If no → also need to migrate existing keys.
 
-### Option B — Revert commit `126d416` (xero_svc → foritadmin)
+### Option 3 — Restore the old `forit-saas-db` as a separate DB
 
-1. `git revert 126d416 --no-edit`
-2. Redeploy.
-3. Done; portal works again.
+Recreate `forit-saas-db` with the old schema (`dbo.customers`, `dbo.api_keys`, etc.), point this connector back at it via env var override on the Azure Function. Roll back commits `9b70876`/`126d416` semantically without reverting them.
 
-**Pros:** Fastest. Known-working baseline.
-**Cons:** Throws away the least-privilege improvement. The shared `foritadmin` account being everywhere is the exact thing that commit was fixing. Comes back to bite when someone audits the SaaS DB credentials.
-**Not recommended unless A is blocked.**
+**Pros:** Fast restore-to-last-known-good for this connector. Doesn't touch the rest of the consolidated platform.
+**Cons:** Heavy — recreate a DB with seed data. Splits identity (portal users vs. connector customers). Reintroduces the architectural drift the consolidation just removed. Future-Ben's problem.
+**Verdict:** Use only if Option 2 is blocked or too slow.
 
-### Option C — Move the connector off the consolidated `forit` DB entirely
+### Option 4 — Short-circuit auth (EMERGENCY ONLY)
 
-Roll back DB consolidation (commit `9b70876`) for the connector module, keeping `forit-saas-db` as before.
+Make `xero.forit.io` trust the portal's `PORTAL_API_KEY` env var (shared secret). Skip DB lookup entirely. Portal proxies always work; direct MCP api_keys break.
 
-**Pros:** Goes back to the last known-good architecture.
-**Cons:** Throws away the consolidation. Loses the gain. The migration was intentional. Not the fight to pick here.
-**Not recommended.**
+**Pros:** 10-line patch. Gets the portal page green in 10 minutes.
+**Cons:** Breaks every non-portal caller (in-session MCP, third-party PA flows). Hides the architectural drift.
+**Verdict:** Don't ship this. Or ship it ONLY as a rollback-in-15-minutes hotfix while Option 2 is built.
 
-## Decision: Option A. Question for Ben below.
+## Recommendation: Option 2
 
-## Open question — single gate
+It's the only option that produces a connector aligned with the consolidated platform. Estimated 1-2h of code change + a small SQL migration script + deploy + verify.
 
-**Can I (or do you want to) run `GRANT SELECT, INSERT, UPDATE ON dbo.customers TO xero_svc;` (and the 4 sister statements) against the live `forit` DB?**
+## Open questions — must answer before execution
 
-Options:
-- **A1 — I run it.** I need: (a) the `foritadmin` (or other SQL admin) password from 1Password, or (b) a confirmed AAD-admin path from this Mac via `mm_run` (the last `az` call I tried timed out at 300s). If I can sqlcmd in as admin, I can run the GRANT statements and verify in one round.
-- **A2 — You run it.** I write `connector/sql/005-grant-xero_svc.sql`, commit it, push it. You run it via Azure Data Studio / SSMS / portal query editor. I then re-curl `xero.forit.io/api/tokens` for verification.
-- **A3 — Skip permissions — turn out the table is genuinely missing.** Then I need a one-off `INSERT INTO forit..customers SELECT * FROM forit-saas-db..customers` migration first. Same gate: admin access to run it.
+1. **Does the portal's "Xero connector" product already issue api_keys into `support.api_keys`?** If yes, Option 2 is straight. If no, need a migration step. *I can verify this by querying `support.api_keys.scopes` for any Xero-related scope. Will do as Step 1 if you green-light.*
+2. **Should `xero.xero_connections` get renamed to `finance.xero_connections`** as commit `eb94b01` intended, or is that a separate piece of work? Probably separate.
+3. **Is the existing user_id model (Entra ID) the right scope for Xero connections, or do you need multi-tenancy?** The `support.api_keys.user_id` is per-Entra-user. The old `customers.id` was a SaaS-customer concept. If the SAME Entra user has Xero connections for multiple customer orgs, we need additional scoping. (For ForIT-internal use, one user → one Xero org is fine.)
 
 ## Validation criteria (all 3 must pass before I close this out)
 
@@ -98,11 +137,12 @@ Options:
 2. With a real portal API key in `x-api-key`: HTTP 200 with token JSON.
 3. `POST https://www.forit.io/api/portal {action:init_xero_connect}` (past the Easy Auth login) returns a Xero authorize URL, not a 503.
 
-## Honesty note
+## Honesty note (updated)
 
-I have not (yet) verified:
-- Whether `customers` actually exists in the `forit` DB
-- What schema it lives under
-- What permissions `xero_svc` currently has
+DB inspection complete. Root cause is **proven, not hypothesized:** schema/identity-model mismatch between connector code and consolidated DB, plus the `xero_svc` user was never created. The original "GRANT permissions" plan would not have worked — there's nothing to grant *on* because `dbo.customers` doesn't exist.
 
-I have **strong direction** (the error text, the commit sequence, the timing) but not **proof**. Phase 4 of the systematic-debugging skill says: prove with a failing test before fixing. The failing test here is the curl above; the proof I'm missing is the DB inspection. **That's why Option A1/A2 starts with a SQL query, not a GRANT.**
+What I still don't know (and would verify as Step 1 of Option 2):
+- Whether the portal's "Xero connector" product issues api_keys into `support.api_keys` (likely yes, but unverified)
+- What the deployed Azure Function's actual `SAAS_DB_USER` env var is (the code default `xero_svc` doesn't exist; the function must be using `foritadmin` via env override since it gets SQL responses at all)
+
+These don't block writing Option 2's code, but they do block deploy verification.
