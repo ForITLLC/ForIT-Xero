@@ -121,9 +121,31 @@ Make `xero.forit.io` trust the portal's `PORTAL_API_KEY` env var (shared secret)
 **Cons:** Breaks every non-portal caller (in-session MCP, third-party PA flows). Hides the architectural drift.
 **Verdict:** Don't ship this. Or ship it ONLY as a rollback-in-15-minutes hotfix while Option 2 is built.
 
-## Recommendation: Option 2
+### Option 5 — Recreate connector's tables under `xero` schema (NEW, after empty-data finding)
 
-It's the only option that produces a connector aligned with the consolidated platform. Estimated 1-2h of code change + a small SQL migration script + deploy + verify.
+DB inspection further revealed: `xero.xero_connections` already exists with the OLD column shape (`customer_id`) and is **empty (0 rows)**. `support.api_keys` has 1 row with NULL scopes — the platform-wide api_keys system isn't actually serving Xero callers yet. So no data needs to be migrated; this is a fresh start.
+
+Smallest viable fix:
+
+1. `CREATE TABLE xero.customers / xero.api_keys / xero.products` with the connector's expected schemas (essentially porting `dbo.customers` from the old `forit-saas-db` into `xero` schema of the consolidated DB).
+2. `xero.xero_connections` already exists; leave alone.
+3. Update connector code's queries to use full schema names: `FROM xero.customers`, `FROM xero.api_keys`, etc. (One pass through `connector/src/services/database.ts` + `connector/src/functions/subscriptions.ts`.)
+4. `CREATE USER xero_svc` in `forit` DB + GRANT on `xero.*`. Provision the SQL login at server level if not done. Pull password into Key Vault under existing `FORIT-SAAS-DB-PASSWORD` (or rename to xero-specific).
+5. Rebuild + zip-deploy connector.
+6. Seed `xero.customers` with the customer rows the portal expects to use (probably 1 row for ForIT itself).
+7. Seed `xero.api_keys` with the portal's PORTAL_API_KEY hash so the portal proxy works.
+8. Verify: `curl xero.forit.io/api/tokens` → 401 with garbage key, 200 with real portal key.
+
+**Pros:** Preserves the connector's existing identity model (customer-based). No big rewrite. Schema-namespaced, aligned with consolidation. Real DB work but no architectural change.
+**Cons:** Keeps two identity systems (the connector's `xero.customers` + the platform's `support.api_keys`). Future-tech-debt to unify them. Probably the same debt you have today.
+
+## Recommendation: Option 5 for now, Option 2 later
+
+**Option 5 (small):** ~1 hour. Creates `xero.*` tables, qualifies the queries, provisions `xero_svc`, redeploys. Restores the portal. Doesn't touch the identity model.
+
+**Option 2 (big, later):** ~3-4 hours. Rewrites connector auth to consume `support.api_keys` (Entra user-based). Removes the connector's local customers/api_keys tables. The right end-state but separate work.
+
+Path: do 5 now to unblock; queue 2 as a follow-up under the consolidation design doc.
 
 ## Open questions — must answer before execution
 
