@@ -151,9 +151,15 @@ async function connectInit(request: HttpRequest, context: InvocationContext): Pr
  * Exchange code for tokens, save to database, redirect back to portal.
  */
 async function connectCallback(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  const stateParam = request.query.get('state');
+  // Decode state up front so the outer catch can redirect back to the
+  // originating customer portal page instead of the bare /portal route
+  // (which is the employee portal).
+  const state = stateParam ? decodeState(stateParam) : null;
+  const fallbackReturnUrl = state?.return_url || 'https://www.forit.io/portal/xero-connector';
+
   try {
     const code = request.query.get('code');
-    const stateParam = request.query.get('state');
     const error = request.query.get('error');
 
     // Handle Xero error
@@ -161,14 +167,10 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
       const errorDescription = request.query.get('error_description') || 'Unknown error';
       context.error('Xero OAuth error', { error, errorDescription });
 
-      // Try to redirect back to portal with error
-      const state = stateParam ? decodeState(stateParam) : null;
-      const returnUrl = state?.return_url || 'https://forit.io/portal';
-
       return {
         status: 302,
         headers: {
-          Location: `${returnUrl}?error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(errorDescription)}`,
+          Location: `${fallbackReturnUrl}?error=${encodeURIComponent(error)}&error_description=${encodeURIComponent(errorDescription)}`,
         },
       };
     }
@@ -180,8 +182,6 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
       };
     }
 
-    // Decode and validate state
-    const state = decodeState(stateParam);
     if (!state) {
       return {
         status: 400,
@@ -265,11 +265,10 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
     const errorMessage = error instanceof Error ? error.message : String(error);
     context.error('Connect callback failed', error);
 
-    // Try to redirect with error
     return {
       status: 302,
       headers: {
-        Location: `https://forit.io/portal?error=callback_failed&error_description=${encodeURIComponent(errorMessage)}`,
+        Location: `${fallbackReturnUrl}?error=callback_failed&error_description=${encodeURIComponent(errorMessage)}`,
       },
     };
   }
