@@ -235,6 +235,21 @@ export async function deleteXeroConnection(customerId: string, connectionId: str
   return result.rowsAffected[0] > 0;
 }
 
+/**
+ * Delete every Xero connection row for a customer. Used when a
+ * refresh attempt returns invalid_grant — the portal must stop
+ * reporting "connected" once Xero has revoked us.
+ *
+ * Returns the number of rows deleted.
+ */
+export async function deleteXeroConnectionsByCustomer(customerId: string): Promise<number> {
+  const db = await getDbPool();
+  const result = await db.request()
+    .input('customer_id', sql.UniqueIdentifier, customerId)
+    .query('DELETE FROM xero.xero_connections WHERE customer_id = @customer_id');
+  return result.rowsAffected[0] || 0;
+}
+
 export async function getXeroConnectionsByCustomer(customerId: string): Promise<XeroConnection[]> {
   const db = await getDbPool();
   const result = await db.request()

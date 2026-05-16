@@ -2,6 +2,7 @@ import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/fu
 import { XeroClient } from 'xero-node';
 import { getSecret, setSecret, SECRETS } from '../services/keyvault';
 import { getCustomerByEmail, saveXeroConnection } from '../services/database';
+import { probeConnection } from '../services/xeroConnection';
 
 /**
  * ForIT Xero Connector - OAuth Connect Endpoints
@@ -233,19 +234,58 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
       };
     }
 
-    // Save connection to database
-    await saveXeroConnection(
-      state.customer_id,
-      tenant.tenantId!,
-      tenant.tenantName || 'Unknown Organization',
-      tokenSet.access_token,
-      tokenSet.refresh_token,
-      tokenSet.expires_at || Math.floor(Date.now() / 1000) + 1800
-    );
+    // Save connection to database. CRITICAL: at this point Xero has
+    // already rotated the refresh token in their server-side state —
+    // if we fail to persist, the user's previous token is dead AND we
+    // have no new token, so the portal will lie unless we cleanup.
+    // Retry once on any failure, then surface loudly so the next
+    // refresh attempt cleans up via the invalid_grant path.
+    const expiresAt = tokenSet.expires_at || Math.floor(Date.now() / 1000) + 1800;
+    let saveError: unknown = null;
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await saveXeroConnection(
+          state.customer_id,
+          tenant.tenantId!,
+          tenant.tenantName || 'Unknown Organization',
+          tokenSet.access_token,
+          tokenSet.refresh_token,
+          expiresAt
+        );
+        saveError = null;
+        break;
+      } catch (err) {
+        saveError = err;
+        context.error('saveXeroConnection failed', {
+          attempt,
+          customerId: state.customer_id,
+          tenantId: tenant.tenantId,
+          refreshTokenHead: tokenSet.refresh_token.slice(0, 12),
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    if (saveError) {
+      const msg = saveError instanceof Error ? saveError.message : String(saveError);
+      return {
+        status: 302,
+        headers: {
+          Location: `${state.return_url}?error=save_failed&error_description=${encodeURIComponent(`Xero authorization succeeded but the connection could not be saved (${msg}). Please try again.`)}`,
+        },
+      };
+    }
 
-    // Also save to Key Vault for interest app compatibility
-    await setSecret(SECRETS.XERO_REFRESH_TOKEN, tokenSet.refresh_token);
-    await setSecret(SECRETS.XERO_TENANT_ID, tenant.tenantId!);
+    // Mirror to Key Vault for interest app compatibility. Failure
+    // here is non-fatal — DB is the truth source — but log it.
+    try {
+      await setSecret(SECRETS.XERO_REFRESH_TOKEN, tokenSet.refresh_token);
+      await setSecret(SECRETS.XERO_TENANT_ID, tenant.tenantId!);
+    } catch (err) {
+      context.error('Key Vault mirror write failed (non-fatal)', {
+        customerId: state.customer_id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     context.log('OAuth complete for customer', {
       customerId: state.customer_id,
@@ -274,6 +314,84 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
   }
 }
 
+/**
+ * GET /api/connection-status?email=...
+ *
+ * Real Xero token probe for the portal. Authoritative answer to
+ * "is this customer's Xero connection actually usable right now?"
+ *
+ * Behavior:
+ *   - 200 {connected: true,  tenantName} — Xero accepts our token
+ *   - 200 {connected: false, reason: 'not_connected'}      — no row
+ *   - 200 {connected: false, reason: 'expired'}            — Xero
+ *       returned invalid_grant; orphan row + KV secret cleaned up
+ *   - 200 {connected: false, reason: 'transient'}          — network
+ *       blip or Xero 5xx; row left intact, retry later
+ *
+ * Auth: portal API key (same as /api/connect/init).
+ *
+ * Why this exists: the portal previously did
+ * `SELECT id FROM xero.xero_connections WHERE customer_id=?` which
+ * confuses "row exists" with "connection works". If an OAuth callback
+ * crashed AFTER apiCallback rotated the refresh token (NULL-id INSERT,
+ * DB blip, anything), the row was left holding a stale refresh token
+ * Xero no longer honors — the portal kept reporting "connected" while
+ * every actual API call 401'd. This endpoint closes that gap.
+ */
+async function connectionStatus(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
+  try {
+    const isValidPortal = await validatePortalApiKey(request);
+    if (!isValidPortal) {
+      return { status: 401, jsonBody: { error: 'Invalid portal API key' } };
+    }
+
+    const email = request.query.get('email');
+    if (!email) {
+      return { status: 400, jsonBody: { error: 'Missing email query parameter' } };
+    }
+
+    const customer = await getCustomerByEmail(email);
+    if (!customer) {
+      return { status: 200, jsonBody: { connected: false, reason: 'no_customer' } };
+    }
+
+    const result = await probeConnection(customer.id);
+
+    switch (result.status) {
+      case 'connected':
+        return {
+          status: 200,
+          jsonBody: {
+            connected: true,
+            tenantId: result.tenantId,
+            tenantName: result.tenantName,
+          },
+        };
+      case 'not_connected':
+        return { status: 200, jsonBody: { connected: false, reason: 'not_connected' } };
+      case 'expired':
+        context.warn('Xero connection expired — cleaned up', {
+          customerId: customer.id,
+          reason: result.reason,
+        });
+        return { status: 200, jsonBody: { connected: false, reason: 'expired' } };
+      case 'transient':
+        context.warn('Xero probe transient failure — connection left intact', {
+          customerId: customer.id,
+          reason: result.reason,
+        });
+        return {
+          status: 200,
+          jsonBody: { connected: false, reason: 'transient', transient: true },
+        };
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    context.error('connection-status failed', error);
+    return { status: 500, jsonBody: { error: errorMessage } };
+  }
+}
+
 // Register endpoints
 app.http('ConnectInit', {
   methods: ['POST'],
@@ -287,4 +405,11 @@ app.http('ConnectCallback', {
   authLevel: 'anonymous',
   route: 'callback',
   handler: connectCallback,
+});
+
+app.http('ConnectionStatus', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'connection-status',
+  handler: connectionStatus,
 });
