@@ -49,9 +49,9 @@ async function authenticateRequest(request: HttpRequest, context: InvocationCont
   }
 
   // Refresh token if expiring within 5 minutes. refreshAndPersist
-  // centralizes invalid_grant cleanup — on dead refresh_token it
-  // deletes the orphan row + disables the KV mirror so the next portal
-  // probe reports the truth instead of lying "connected".
+  // serializes refreshes per-customer (SQL app-lock) so concurrent
+  // requests don't race the single-use refresh token; a dead grant
+  // returns 'expired' (mapped to 401 below) without deleting the row.
   const now = Math.floor(Date.now() / 1000);
   let accessToken = connection.access_token || '';
 
@@ -61,7 +61,7 @@ async function authenticateRequest(request: HttpRequest, context: InvocationCont
     if (refreshed.status === 'connected') {
       accessToken = refreshed.accessToken;
     } else if (refreshed.status === 'expired') {
-      context.warn('Xero refresh returned invalid_grant — connection cleaned up', { customerId: customer.id });
+      context.warn('Xero refresh returned invalid_grant — re-consent required', { customerId: customer.id });
       return {
         status: 401,
         jsonBody: {

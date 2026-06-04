@@ -19,13 +19,14 @@ import { refreshAndPersist } from '../services/xeroConnection';
  * new value to DB + the KV mirror, so a daily run also keeps the KV
  * mirror (read by the interest app) current.
  *
- * IMPORTANT follow-up (not fixed here): the refresh token is shared
- * between this connector and the interest app, and Xero rotates it on
- * every use. If BOTH apps refresh independently they rotate the token
- * out from under each other and cause the very invalid_grant this guards
- * against. This keep-alive should become the SINGLE owner of refreshes;
- * the interest app should read the rotated token from KV rather than
- * refreshing on its own. See ALERT_MARKER occurrences in logs/alerts.
+ * Concurrency: the refresh token is single-use and shared, so two
+ * refreshers racing would rotate it out from under each other. That is
+ * now handled inside refreshAndPersist via a per-customer SQL app-lock
+ * plus a double-checked read — the interest app is already a pure KV
+ * consumer and never rotates. A genuine invalid_grant no longer
+ * auto-deletes the connection; it surfaces here as 'expired' and fires
+ * the ALERT_MARKER so a human can re-consent. See ALERT_MARKER
+ * occurrences in logs/alerts.
  */
 
 const ALERT_MARKER = 'XERO_KEEPALIVE_ALERT';
@@ -113,8 +114,9 @@ async function xeroKeepAlive(timer: Timer, context: InvocationContext): Promise<
           tally.connected++;
           break;
         case 'expired':
-          // invalid_grant — refreshAndPersist already cleaned up the row
-          // + disabled the KV mirror. This connection now needs re-consent.
+          // invalid_grant — the grant is genuinely dead (refreshAndPersist
+          // no longer auto-deletes; the row stays so this keeps alerting
+          // until a human re-consents).
           tally.expired.push(customerId);
           break;
         case 'transient':

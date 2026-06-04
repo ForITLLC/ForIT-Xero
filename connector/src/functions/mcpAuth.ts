@@ -71,8 +71,9 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
         };
       }
       if (refreshed.status === 'expired') {
-        // refreshAndPersist already deleted the orphan row + KV secret.
-        context.warn('Xero refresh returned invalid_grant — connection cleaned up', { customerId: customer.id });
+        // Genuine invalid_grant. refreshAndPersist no longer deletes the
+        // row; re-consent through the portal is required.
+        context.warn('Xero refresh returned invalid_grant — re-consent required', { customerId: customer.id });
         return {
           status: 401,
           jsonBody: {

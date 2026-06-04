@@ -1,22 +1,31 @@
 import { XeroClient } from 'xero-node';
+import type { Transaction } from 'mssql';
 import { getSecret, setSecret, disableSecret, SECRETS } from './keyvault';
 import {
   getXeroConnection,
   updateXeroTokens,
   deleteXeroConnectionsByCustomer,
+  withRefreshLock,
   XeroConnection,
 } from './database';
 
 /**
  * Centralized Xero token-refresh + connection-state service.
  *
- * Background: any failure between `apiCallback` returning a new tokenSet
- * and saveXeroConnection committing it leaves Xero rotated and the DB
- * stale. Once stale, every subsequent refresh attempt gets
- * `invalid_grant: Refresh token not found` from Xero, but the system
- * still reported "connected" because the row still existed. This
- * module centralizes refresh + invalid_grant cleanup so every Xero
- * call site benefits.
+ * Xero refresh tokens are single-use: each refresh rotates the token
+ * and invalidates the previous one. If two refreshers run concurrently
+ * (in-process async overlap OR two Function instances on Consumption),
+ * both read the same refresh token, the first wins, and the second gets
+ * `invalid_grant: Refresh token not found`. The old behavior treated
+ * that loser as a dead connection and DELETED the row + disabled the KV
+ * secret — nuking a live grant and forcing a human re-consent.
+ *
+ * Fix: refreshAndPersist now serializes per-customer via a SQL
+ * app-lock (withRefreshLock) and double-checks the stored token after
+ * acquiring the lock — so the loser of a race simply returns the
+ * freshly-rotated token instead of refreshing again. invalid_grant no
+ * longer auto-deletes; it logs a greppable marker and reports
+ * 'expired', leaving re-consent as a deliberate human action.
  */
 
 const XERO_CLIENT_ID = process.env.XERO_CLIENT_ID;
@@ -84,14 +93,63 @@ async function getXeroClientForRefresh(): Promise<XeroClient> {
 
 /**
  * Refresh the customer's Xero token and persist the rotated values to
- * DB + KV. On invalid_grant: cleanup the orphan row and return
- * 'expired'. On transient error: leave the row in place and return
- * 'transient'.
+ * DB + KV. Serializes per-customer via a SQL app-lock so two callers
+ * never burn the same single-use refresh token. On invalid_grant: log
+ * a marker and return 'expired' WITHOUT deleting the connection. On
+ * transient error: leave the row in place and return 'transient'.
  */
 export async function refreshAndPersist(customerId: string): Promise<RefreshResult> {
+  const locked = await withRefreshLock(customerId, (tx) =>
+    refreshAndPersistLocked(customerId, tx),
+  );
+  if (locked.acquired) return locked.value;
+
+  // Couldn't take the lock within the timeout — another refresher is
+  // mid-rotation. Re-read the connection; if it was just rotated to a
+  // fresh access token, report that instead of a spurious transient.
   const connection = await getXeroConnection(customerId);
   if (!connection || !connection.refresh_token || !connection.tenant_id) {
     return { status: 'not_connected' };
+  }
+  const now = Math.floor(Date.now() / 1000);
+  if (connection.access_token && connection.expires_at && connection.expires_at > now + 60) {
+    return {
+      status: 'connected',
+      tenantId: connection.tenant_id,
+      tenantName: connection.tenant_name || 'Unknown Organization',
+      accessToken: connection.access_token,
+      refreshToken: connection.refresh_token,
+      expiresAt: connection.expires_at,
+    };
+  }
+  return { status: 'transient', reason: 'refresh_lock_unavailable' };
+}
+
+/**
+ * Lock-scoped refresh body. Runs inside the transaction that holds the
+ * per-customer app-lock; all DB reads/writes use that same tx so they
+ * see a consistent view and commit atomically when the lock releases.
+ */
+async function refreshAndPersistLocked(customerId: string, tx: Transaction): Promise<RefreshResult> {
+  const connection = await getXeroConnection(customerId, tx);
+  if (!connection || !connection.refresh_token || !connection.tenant_id) {
+    return { status: 'not_connected' };
+  }
+
+  // Double-checked under the lock: another refresher may have rotated
+  // the token while we waited. If the access token is still comfortably
+  // fresh (>5 min), skip the refresh — rotating again would needlessly
+  // burn a single-use token and could itself trigger a race downstream.
+  const now = Math.floor(Date.now() / 1000);
+  if (connection.access_token && connection.expires_at && connection.expires_at > now + 300) {
+    return {
+      status: 'connected',
+      tenantId: connection.tenant_id,
+      tenantName: connection.tenant_name || 'Unknown Organization',
+      accessToken: connection.access_token,
+      refreshToken: connection.refresh_token,
+      expiresAt: connection.expires_at,
+    };
   }
 
   let newTokenSet;
@@ -105,7 +163,14 @@ export async function refreshAndPersist(customerId: string): Promise<RefreshResu
     newTokenSet = await xeroClient.refreshToken();
   } catch (err) {
     if (isInvalidGrantError(err)) {
-      await cleanupDeadConnection(customerId);
+      // DO NOT delete the row / disable the KV secret here. A lost
+      // refresh race used to land the loser on this branch and nuke a
+      // live grant, forcing re-consent. With serialization that race
+      // is gone; a genuine invalid_grant now needs a deliberate human
+      // re-consent, not an automatic teardown. Emit a greppable marker.
+      console.error(
+        `XERO_REFRESH_INVALID_GRANT customer=${customerId} — refresh rejected; NOT cleaning up. Manual re-consent required if this persists.`,
+      );
       return { status: 'expired', reason: 'invalid_grant' };
     }
     const msg = err instanceof Error ? err.message : String(err);
@@ -124,12 +189,12 @@ export async function refreshAndPersist(customerId: string): Promise<RefreshResu
       newTokenSet.access_token,
       newTokenSet.refresh_token,
       newTokenSet.expires_at || Math.floor(Date.now() / 1000) + 1800,
+      tx,
     );
   } catch (err) {
-    // DB write failed AFTER Xero rotated the token. This is exactly
-    // the poisoned-state we are trying to prevent elsewhere. Best we
-    // can do here is surface the failure loudly — the next refresh
-    // attempt will hit invalid_grant and clean up via this same path.
+    // DB write failed AFTER Xero rotated the token. The tx will roll
+    // back, leaving the row pointing at the now-invalid old token; the
+    // next refresh will hit invalid_grant. Surface loudly.
     const msg = err instanceof Error ? err.message : String(err);
     return { status: 'transient', reason: `db_write_failed_after_rotation: ${msg}` };
   }

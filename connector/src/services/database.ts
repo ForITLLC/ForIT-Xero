@@ -73,6 +73,67 @@ async function getDbPool(): Promise<sql.ConnectionPool> {
 // Aliases for backwards compatibility
 const getSaasPool = getDbPool;
 
+// A query can run on either the shared pool or a pinned transaction.
+type DbExecutor = sql.ConnectionPool | sql.Transaction;
+
+// Build a Request bound to a caller-supplied executor (transaction) so
+// lock-scoped reads/writes run on the same connection that holds the
+// app-lock; falls back to the shared pool when no executor is given.
+async function requestOn(executor?: DbExecutor): Promise<sql.Request> {
+  // Narrow the union so each branch matches a concrete Request overload
+  // (mssql's constructor has no ConnectionPool|Transaction overload).
+  if (executor instanceof sql.Transaction) return new sql.Request(executor);
+  if (executor) return new sql.Request(executor);
+  const pool = await getDbPool();
+  return pool.request();
+}
+
+// Serialize Xero token refresh per customer across in-process async
+// overlap AND multiple Function instances. sp_getapplock with
+// LockOwner='Transaction' ties the mutex to the lifetime of the tx,
+// so a crash releases it automatically. Returns acquired:false when
+// the lock can't be taken within lockTimeoutMs (another refresher won).
+export async function withRefreshLock<T>(
+  customerId: string,
+  fn: (tx: sql.Transaction) => Promise<T>,
+  lockTimeoutMs = 10000,
+): Promise<{ acquired: true; value: T } | { acquired: false }> {
+  const pool = await getDbPool();
+  const tx = new sql.Transaction(pool);
+  let begun = false;
+  try {
+    await tx.begin();
+    begun = true;
+    const lockRes = await new sql.Request(tx)
+      .input('resource', sql.NVarChar(255), `xero-refresh-${customerId}`)
+      .input('timeout', sql.Int, lockTimeoutMs)
+      .query(`
+        DECLARE @rc int;
+        EXEC @rc = sp_getapplock
+          @Resource = @resource, @LockMode = 'Exclusive',
+          @LockOwner = 'Transaction', @LockTimeout = @timeout;
+        SELECT @rc AS rc;
+      `);
+    const rc: number = lockRes.recordset?.[0]?.rc ?? -999;
+    if (rc < 0) {
+      await tx.rollback();
+      return { acquired: false };
+    }
+    const value = await fn(tx);
+    await tx.commit();
+    return { acquired: true, value };
+  } catch (err) {
+    if (begun) {
+      try {
+        await tx.rollback();
+      } catch {
+        // already rolled back / connection gone — nothing to do
+      }
+    }
+    throw err;
+  }
+}
+
 // Customer functions (use saasPool - forit-saas-db)
 export async function createCustomer(email: string, companyName?: string, firstName?: string, lastName?: string): Promise<Customer> {
   const db = await getSaasPool();
@@ -193,9 +254,12 @@ export async function saveXeroConnection(
   return result.recordset[0];
 }
 
-export async function getXeroConnection(customerId: string): Promise<XeroConnection | null> {
-  const db = await getDbPool();
-  const result = await db.request()
+export async function getXeroConnection(
+  customerId: string,
+  executor?: DbExecutor,
+): Promise<XeroConnection | null> {
+  const request = await requestOn(executor);
+  const result = await request
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .query('SELECT * FROM xero.xero_connections WHERE customer_id = @customer_id');
   return result.recordset[0] || null;
@@ -205,10 +269,11 @@ export async function updateXeroTokens(
   customerId: string,
   accessToken: string,
   refreshToken: string,
-  expiresAt: number
+  expiresAt: number,
+  executor?: DbExecutor,
 ): Promise<void> {
-  const db = await getDbPool();
-  await db.request()
+  const request = await requestOn(executor);
+  await request
     .input('customer_id', sql.UniqueIdentifier, customerId)
     .input('access_token', sql.NVarChar(sql.MAX), accessToken)
     .input('refresh_token', sql.NVarChar(sql.MAX), refreshToken)
