@@ -1,29 +1,13 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { validateApiKey, checkProductAccess, getXeroConnection, updateXeroTokens } from '../services/database';
-import { getSecret, SECRETS } from '../services/keyvault';
-import { XeroClient } from 'xero-node';
+import { validateApiKey, checkProductAccess, getXeroConnection } from '../services/database';
+import { refreshAndPersist } from '../services/xeroConnection';
 
 /**
  * Power Automate Custom Connector Endpoints
  * These endpoints expose Xero operations for Power Automate flows
  */
 
-const BASE_URL = process.env.BASE_URL || 'https://xero.forit.io';
-const XERO_CLIENT_ID = process.env.XERO_CLIENT_ID;
 const PRODUCT_SLUG = 'xero-connector';
-
-async function getXeroClient(): Promise<XeroClient> {
-  if (!XERO_CLIENT_ID) {
-    throw new Error('XERO_CLIENT_ID not configured');
-  }
-  const clientSecret = await getSecret(SECRETS.XERO_CLIENT_SECRET);
-  return new XeroClient({
-    clientId: XERO_CLIENT_ID,
-    clientSecret,
-    redirectUris: [`${BASE_URL}/api/callback`],
-    scopes: ['openid', 'profile', 'email', 'accounting.transactions', 'accounting.settings', 'accounting.contacts', 'offline_access'],
-  });
-}
 
 type AuthSuccess = { customerId: string; tenantId: string; accessToken: string };
 type AuthResult = AuthSuccess | HttpResponseInit;
@@ -64,36 +48,39 @@ async function authenticateRequest(request: HttpRequest, context: InvocationCont
     };
   }
 
-  // Refresh token if needed
+  // Refresh token if expiring within 5 minutes. refreshAndPersist
+  // centralizes invalid_grant cleanup — on dead refresh_token it
+  // deletes the orphan row + disables the KV mirror so the next portal
+  // probe reports the truth instead of lying "connected".
   const now = Math.floor(Date.now() / 1000);
   let accessToken = connection.access_token || '';
 
   if (connection.expires_at && now > connection.expires_at - 300) {
     context.log('Refreshing expired token', { customerId: customer.id });
-    try {
-      const xeroClient = await getXeroClient();
-      await xeroClient.initialize();
-      xeroClient.setTokenSet({
-        refresh_token: connection.refresh_token,
-        access_token: connection.access_token,
-        expires_at: connection.expires_at,
-      });
-      const newTokenSet = await xeroClient.refreshToken();
-      await updateXeroTokens(
-        customer.id,
-        newTokenSet.access_token || '',
-        newTokenSet.refresh_token || connection.refresh_token || '',
-        newTokenSet.expires_at || 0
-      );
-      accessToken = newTokenSet.access_token || '';
-    } catch (error) {
-      context.error('Token refresh failed', { customerId: customer.id, error });
+    const refreshed = await refreshAndPersist(customer.id);
+    if (refreshed.status === 'connected') {
+      accessToken = refreshed.accessToken;
+    } else if (refreshed.status === 'expired') {
+      context.warn('Xero refresh returned invalid_grant — connection cleaned up', { customerId: customer.id });
       return {
         status: 401,
         jsonBody: {
           error: 'Xero connection expired',
-          message: 'The Xero refresh token has expired (tokens expire after 60 days of inactivity). Please re-authorize through the ForIT portal.',
+          message: 'The Xero refresh token is no longer valid. Please re-authorize through the ForIT portal.',
           portalUrl: 'https://forit.io/portal',
+        },
+      };
+    } else {
+      // transient — leave the row alone, surface 503 so caller retries
+      context.error('Xero refresh transient failure', {
+        customerId: customer.id,
+        reason: refreshed.status === 'transient' ? refreshed.reason : refreshed.status,
+      });
+      return {
+        status: 503,
+        jsonBody: {
+          error: 'Xero refresh temporarily unavailable',
+          message: 'Please retry shortly.',
         },
       };
     }

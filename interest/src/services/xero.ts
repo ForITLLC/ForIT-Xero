@@ -1,5 +1,5 @@
 import { XeroClient } from 'xero-node';
-import { getSecret, setSecret, SECRETS } from './keyvault';
+import { getSecret, SECRETS } from './keyvault';
 import { sendFailureNotification } from './notifications';
 import {
   XeroInvoice,
@@ -12,12 +12,55 @@ let xeroClient: XeroClient | null = null;
 let tenantId: string | null = null;
 let tokenExpiresAt: number = 0; // Timestamp when token expires
 
-// Token refresh buffer - refresh 5 minutes before expiry
+// Token refresh buffer - fetch a fresh access token 5 minutes before expiry
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 
+// The connector (forit-xero-mcp) is the single owner of the Xero refresh
+// token. We fetch access tokens from its /api/tokens endpoint.
+const CONNECTOR_BASE_URL = process.env.CONNECTOR_BASE_URL || 'https://xero.forit.io';
+
+interface ConnectorTokenSet {
+  access_token: string;
+  refresh_token?: string;
+  tenant_id: string;
+  expires_at: number; // epoch seconds
+}
+
 /**
- * Initialize and return authenticated Xero client
- * Automatically refreshes token if expired or about to expire
+ * Fetch a fresh access token from the connector's /api/tokens endpoint.
+ *
+ * The connector refreshes (and rotates the refresh token) on demand when
+ * the access token is near expiry, persisting the rotated token to DB + the
+ * KV mirror. This app must therefore NEVER rotate the refresh token itself —
+ * doing so in parallel with the connector rotated the single-use token out
+ * from under each other and produced invalid_grant.
+ */
+async function fetchConnectorTokens(): Promise<ConnectorTokenSet> {
+  const apiKey = await getSecret(SECRETS.CONNECTOR_API_KEY);
+
+  const response = await fetch(`${CONNECTOR_BASE_URL}/api/tokens`, {
+    headers: { 'x-api-key': apiKey },
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Connector /api/tokens returned ${response.status}: ${body}`);
+  }
+
+  const data = (await response.json()) as Partial<ConnectorTokenSet>;
+  if (!data.access_token || !data.tenant_id) {
+    throw new Error('Connector /api/tokens response missing access_token or tenant_id');
+  }
+
+  return data as ConnectorTokenSet;
+}
+
+/**
+ * Initialize and return authenticated Xero client.
+ *
+ * Single-owner token model: the connector owns the refresh token and rotates
+ * it; this app only fetches a fresh ACCESS token from the connector and sets
+ * it on the client. It never calls refreshWithRefreshToken.
  */
 export async function getXeroClient(): Promise<XeroClient> {
   const now = Date.now();
@@ -32,11 +75,8 @@ export async function getXeroClient(): Promise<XeroClient> {
     throw new Error('XERO_CLIENT_ID environment variable not set');
   }
 
-  const clientSecret = await getSecret(SECRETS.XERO_CLIENT_SECRET);
-  const refreshToken = await getSecret(SECRETS.XERO_REFRESH_TOKEN);
-  tenantId = await getSecret(SECRETS.XERO_TENANT_ID);
-
   if (!xeroClient) {
+    const clientSecret = await getSecret(SECRETS.XERO_CLIENT_SECRET);
     xeroClient = new XeroClient({
       clientId,
       clientSecret,
@@ -56,23 +96,22 @@ export async function getXeroClient(): Promise<XeroClient> {
     await xeroClient.initialize();
   }
 
-  // Refresh the token
-  console.log('Refreshing Xero token...');
+  console.log('Fetching fresh Xero access token from connector...');
 
   try {
-    const tokenSet = await xeroClient.refreshWithRefreshToken(clientId, clientSecret, refreshToken);
+    const tokens = await fetchConnectorTokens();
 
-    // Store the new refresh token
-    if (tokenSet.refresh_token) {
-      await setSecret(SECRETS.XERO_REFRESH_TOKEN, tokenSet.refresh_token);
-    }
+    tenantId = tokens.tenant_id;
+    tokenExpiresAt = tokens.expires_at * 1000; // connector returns epoch seconds
 
-    // Track when this token expires (default 30 min = 1800 seconds)
-    const expiresIn = tokenSet.expires_in || 1800;
-    tokenExpiresAt = now + (expiresIn * 1000);
-    console.log(`Xero token refreshed, expires in ${expiresIn} seconds`);
+    xeroClient.setTokenSet({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: tokens.expires_at,
+      token_type: 'Bearer',
+    } as any);
 
-    xeroClient.setTokenSet(tokenSet);
+    console.log(`Xero access token set, expires at ${new Date(tokenExpiresAt).toISOString()}`);
 
     return xeroClient;
   } catch (error) {
@@ -81,9 +120,8 @@ export async function getXeroClient(): Promise<XeroClient> {
     // Clear cached client so next call will try fresh
     clearXeroClient();
 
-    // Send notification to user who authorized
-    await sendFailureNotification('Xero Token Refresh', err, {
-      hint: 'Refresh token may be expired. Re-authorization required.',
+    await sendFailureNotification('Xero Token Fetch', err, {
+      hint: 'Connector /api/tokens failed. If the connection is dead, re-authorize at https://forit.io/portal.',
     });
 
     throw err;
