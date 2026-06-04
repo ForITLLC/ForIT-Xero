@@ -42,4 +42,8 @@ export const SECRETS = {
   XERO_TENANT_ID: 'xero-tenant-id',
   NOTIFICATION_EMAIL: 'notification-email',
   MCP_XERO_CLIENT_SECRET: 'MCP-XERO-CLIENT-SECRET',
+  // API key for the connector's /api/tokens endpoint. The connector is the
+  // single owner of the Xero refresh token; this app fetches access tokens
+  // from it rather than rotating the refresh token itself.
+  CONNECTOR_API_KEY: 'connector-api-key',
 } as const;

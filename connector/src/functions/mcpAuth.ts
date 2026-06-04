@@ -1,45 +1,11 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
-import { XeroClient } from 'xero-node';
-import { getSecret, setSecret, SECRETS } from '../services/keyvault';
-import {
-  validateApiKey,
-  getXeroConnection,
-  updateXeroTokens,
-} from '../services/database';
+import { validateApiKey, getXeroConnection } from '../services/database';
+import { refreshAndPersist } from '../services/xeroConnection';
 
 /**
  * ForIT Xero Connector - MCP Token Endpoint
  * Public signup has been moved to the ForIT portal.
  */
-
-const BASE_URL = process.env.BASE_URL || 'https://xero.forit.io';
-const XERO_CLIENT_ID = process.env.XERO_CLIENT_ID;
-
-async function getXeroClient(includeSecret = false, state?: string): Promise<XeroClient> {
-  if (!XERO_CLIENT_ID) {
-    throw new Error('XERO_CLIENT_ID not configured');
-  }
-
-  const clientSecret = includeSecret
-    ? await getSecret(SECRETS.XERO_CLIENT_SECRET)
-    : 'placeholder';
-
-  return new XeroClient({
-    clientId: XERO_CLIENT_ID,
-    clientSecret,
-    redirectUris: [`${BASE_URL}/api/callback`],
-    scopes: [
-      'openid',
-      'profile',
-      'email',
-      'accounting.transactions',
-      'accounting.settings',
-      'accounting.contacts',
-      'offline_access',
-    ],
-    state: state || 'default-state',
-  });
-}
 
 /**
  * Disabled Endpoint Handler - Public signup has been moved to portal
@@ -92,50 +58,39 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
     const now = Math.floor(Date.now() / 1000);
     if (connection.expires_at && now > connection.expires_at - 300) {
       context.log('Refreshing expired token', { customerId: customer.id });
-
-      try {
-        const xeroClient = await getXeroClient(true);
-        await xeroClient.initialize();
-        xeroClient.setTokenSet({
-          refresh_token: connection.refresh_token,
-          access_token: connection.access_token,
-          expires_at: connection.expires_at,
-        });
-
-        const newTokenSet = await xeroClient.refreshToken();
-
-        await updateXeroTokens(
-          customer.id,
-          newTokenSet.access_token || '',
-          newTokenSet.refresh_token || connection.refresh_token || '',
-          newTokenSet.expires_at || 0
-        );
-
-        // Also update Key Vault for interest app
-        if (newTokenSet.refresh_token) {
-          await setSecret(SECRETS.XERO_REFRESH_TOKEN, newTokenSet.refresh_token);
-        }
-
+      const refreshed = await refreshAndPersist(customer.id);
+      if (refreshed.status === 'connected') {
         return {
           status: 200,
           jsonBody: {
-            access_token: newTokenSet.access_token,
-            refresh_token: newTokenSet.refresh_token,
-            tenant_id: connection.tenant_id,
-            expires_at: newTokenSet.expires_at,
+            access_token: refreshed.accessToken,
+            refresh_token: refreshed.refreshToken,
+            tenant_id: refreshed.tenantId,
+            expires_at: refreshed.expiresAt,
           },
         };
-      } catch (error) {
-        context.error('Token refresh failed', { customerId: customer.id, error });
+      }
+      if (refreshed.status === 'expired') {
+        // refreshAndPersist already deleted the orphan row + KV secret.
+        context.warn('Xero refresh returned invalid_grant — connection cleaned up', { customerId: customer.id });
         return {
           status: 401,
           jsonBody: {
             error: 'Xero connection expired',
-            message: 'The Xero refresh token has expired (tokens expire after 60 days of inactivity). Please re-authorize through the ForIT portal.',
+            message: 'The Xero refresh token is no longer valid. Please re-authorize through the ForIT portal.',
             portalUrl: 'https://forit.io/portal',
           },
         };
       }
+      // transient — leave the row alone, surface 503
+      context.error('Xero refresh transient failure', { customerId: customer.id, reason: refreshed.status === 'transient' ? refreshed.reason : 'unknown' });
+      return {
+        status: 503,
+        jsonBody: {
+          error: 'Xero refresh temporarily unavailable',
+          message: 'Please retry shortly.',
+        },
+      };
     }
 
     return {
