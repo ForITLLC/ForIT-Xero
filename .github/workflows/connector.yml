@@ -12,6 +12,10 @@ env:
   AZURE_FUNCTIONAPP_NAME: forit-xero-mcp
   AZURE_FUNCTIONAPP_PACKAGE_PATH: connector
   NODE_VERSION: '24.x'
+  # Force JS action runtimes (checkout@v4, setup-node@v4, azure/login, functions-action,
+  # upload-artifact) onto Node24 — node-version above does NOT reach action runtime.
+  # GitHub-documented; required before 2026-06-16 runner default flip. (per-dev #240)
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build-and-deploy:
