@@ -6,7 +6,7 @@ import { InterestConfig, InterestLedgerEntry } from '../types';
 // Database configuration
 const DB_SERVER = process.env.SQL_SERVER || 'forit-saas-sql.database.windows.net';
 const DB_NAME = process.env.SQL_DATABASE || 'forit';
-const DB_USER = process.env.SQL_USER || 'foritadmin';
+const DB_USER = process.env.SQL_USER || 'xero_svc';
 const KEY_VAULT_URL = 'https://forit-saas-kv.vault.azure.net/';
 const PASSWORD_SECRET_NAME = 'FORIT-SAAS-DB-PASSWORD';
 
