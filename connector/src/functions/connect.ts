@@ -3,6 +3,7 @@ import { XeroClient } from 'xero-node';
 import { getSecret, setSecret, SECRETS } from '../services/keyvault';
 import { getCustomerByEmail, saveXeroConnection } from '../services/database';
 import { probeConnection } from '../services/xeroConnection';
+import { errorResponse, reportFailure } from '../services/errors';
 
 /**
  * ForIT Xero Connector - OAuth Connect Endpoints
@@ -135,13 +136,7 @@ async function connectInit(request: HttpRequest, context: InvocationContext): Pr
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Connect init failed', error);
-
-    return {
-      status: 500,
-      jsonBody: { error: errorMessage },
-    };
+    return errorResponse(context, 'Connect init failed', error);
   }
 }
 
@@ -266,11 +261,11 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
       }
     }
     if (saveError) {
-      const msg = saveError instanceof Error ? saveError.message : String(saveError);
+      const correlationId = reportFailure(context, 'saveXeroConnection failed after retries', saveError);
       return {
         status: 302,
         headers: {
-          Location: `${state.return_url}?error=save_failed&error_description=${encodeURIComponent(`Xero authorization succeeded but the connection could not be saved (${msg}). Please try again.`)}`,
+          Location: `${state.return_url}?error=save_failed&error_description=${encodeURIComponent('Xero authorization succeeded but the connection could not be saved. Please try again or contact support@forit.io.')}&correlation_id=${correlationId}`,
         },
       };
     }
@@ -302,13 +297,12 @@ async function connectCallback(request: HttpRequest, context: InvocationContext)
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Connect callback failed', error);
+    const correlationId = reportFailure(context, 'Connect callback failed', error);
 
     return {
       status: 302,
       headers: {
-        Location: `${fallbackReturnUrl}?error=callback_failed&error_description=${encodeURIComponent(errorMessage)}`,
+        Location: `${fallbackReturnUrl}?error=callback_failed&error_description=${encodeURIComponent('Xero authorization could not be completed. Please try again or contact support@forit.io.')}&correlation_id=${correlationId}`,
       },
     };
   }
@@ -386,9 +380,7 @@ async function connectionStatus(request: HttpRequest, context: InvocationContext
         };
     }
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('connection-status failed', error);
-    return { status: 500, jsonBody: { error: errorMessage } };
+    return errorResponse(context, 'connection-status failed', error);
   }
 }
 

@@ -35,6 +35,21 @@ jobs:
         run: npm run build
         working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
 
+      # Guards the raw-error leak class (WO#1137 D1). A failure here must stop
+      # the deploy — that is the whole point of the step.
+      - name: Test
+        run: npm test
+        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+
+      # Stamps the commit into the package so /api/health can report what the
+      # running app actually is, rather than what a working copy claims.
+      - name: Stamp build info
+        run: |
+          printf '{"commit":"%s","built_at":"%s"}\n' \
+            "$GITHUB_SHA" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > build-info.json
+          cat build-info.json
+        working-directory: ${{ env.AZURE_FUNCTIONAPP_PACKAGE_PATH }}
+
       - name: Login to Azure
         uses: azure/login@v1
         with:

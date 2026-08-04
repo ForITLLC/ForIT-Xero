@@ -7,7 +7,9 @@
     "build": "tsc",
     "watch": "tsc -w",
     "start": "func start",
-    "prestart": "npm run build"
+    "prestart": "npm run build",
+    "test": "node --test test/*.test.js",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@azure/functions": "^4.0.0",
