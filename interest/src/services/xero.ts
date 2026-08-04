@@ -1,4 +1,4 @@
-import { XeroClient } from 'xero-node';
+import { XeroClient, Invoice } from 'xero-node';
 import { getSecret, SECRETS } from './keyvault';
 import { sendFailureNotification } from './notifications';
 import {
@@ -392,7 +392,7 @@ export async function voidInvoice(invoiceId: string): Promise<void> {
     {
       invoices: [{
         invoiceID: invoiceId,
-        status: 'VOIDED' as any,
+        status: Invoice.StatusEnum.VOIDED,
       }],
     }
   );
@@ -430,7 +430,7 @@ export async function deleteInvoice(invoiceId: string): Promise<void> {
     {
       invoices: [{
         invoiceID: invoiceId,
-        status: 'DELETED' as any,
+        status: Invoice.StatusEnum.DELETED,
       }],
     }
   );
@@ -450,7 +450,7 @@ export async function moveToDraft(invoiceId: string): Promise<void> {
     {
       invoices: [{
         invoiceID: invoiceId,
-        status: 'DRAFT' as any,
+        status: Invoice.StatusEnum.DRAFT,
       }],
     }
   );
@@ -522,7 +522,7 @@ export async function authorizeInvoice(invoiceId: string): Promise<void> {
     {
       invoices: [{
         invoiceID: invoiceId,
-        status: 'AUTHORISED' as any,
+        status: Invoice.StatusEnum.AUTHORISED,
       }],
     }
   );
@@ -731,12 +731,12 @@ export async function getOrCreateInterestInvoice(
 
   const createResponse = await client.accountingApi.createInvoices(xeroTenantId, {
     invoices: [{
-      type: 'ACCREC' as any,
+      type: Invoice.TypeEnum.ACCREC,
       contact: { contactID: contactId },
       date: formatXeroDate(invoiceDate),
       dueDate: formatXeroDate(dueDate),
       reference: reference,
-      status: 'DRAFT' as any,
+      status: Invoice.StatusEnum.DRAFT,
       lineItems: [lineItem],
       currencyCode: currencyCode,
     } as any],

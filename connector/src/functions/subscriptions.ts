@@ -495,8 +495,10 @@ async function handleSubscriptionDeleted(subscription: Stripe.Subscription, cont
     return;
   }
 
-  const sub = subscription as unknown as { ended_at?: number };
-  const endsAt = sub.ended_at ? new Date(sub.ended_at * 1000) : new Date();
+  // No cast: stripe-node 20.1.0 declares `ended_at: number | null` on
+  // Subscription. The previous `as unknown as { ended_at?: number }` asserted a
+  // shape nobody had checked — the same habit that hid the current_period move.
+  const endsAt = toDate(subscription.ended_at) ?? new Date();
 
   await updateCustomerProductSubscription(
     customerProduct.customer_id,

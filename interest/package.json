@@ -9,7 +9,8 @@
     "clean": "rimraf dist",
     "prestart": "npm run clean && npm run build",
     "start": "func start",
-    "test": "jest"
+    "test": "node --test test/*.test.js",
+    "pretest": "npm run build"
   },
   "dependencies": {
     "@azure/communication-email": "^1.1.0",
