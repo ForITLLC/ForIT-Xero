@@ -40,7 +40,7 @@ async function checkInvoice(request: HttpRequest, context: InvocationContext): P
           amountPaid: invoice.amountPaid,
           dueDate: invoice.dueDate,
           date: invoice.date,
-          reference: (invoice as any).reference,
+          reference: invoice.reference,
           paymentsCount: invoice.payments?.length || 0,
           creditNotesCount: invoice.creditNotes?.length || 0,
         },

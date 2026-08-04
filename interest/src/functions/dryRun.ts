@@ -59,7 +59,7 @@ async function dryRun(request: HttpRequest, context: InvocationContext): Promise
             invoiceNumber: c.sourceInvoice.invoiceNumber,
             amountDue: c.sourceInvoice.amountDue,
             dueDate: c.sourceInvoice.dueDate,
-          } as any,
+          },
         })),
       })),
       totalInterest: summary.totalInterest,
