@@ -41,6 +41,25 @@ const MODULES = [
   'functions/health.js',
 ];
 
+/**
+ * The anonymous surface, by name. A `>=` count was the previous assertion and
+ * it was too weak in both directions: it silently absorbed the 28th route
+ * (/api/version) and would have passed just as happily if a route had been
+ * deleted. An exact set makes any change to the surface a decision.
+ */
+const EXPECTED_ANONYMOUS_ROUTES = [
+  'ConnectInit', 'ConnectCallback', 'ConnectionStatus',
+  'ConnectorApiDefinition', 'ConnectorCreateContact', 'ConnectorCreateInvoice',
+  'ConnectorCreatePayment', 'ConnectorDeletePayment', 'ConnectorGetContactBalance',
+  'ConnectorGetContractorBalances', 'ConnectorGetDefaultTenant', 'ConnectorGetInvoice',
+  'ConnectorGetInvoicePayments', 'ConnectorGetInvoices', 'ConnectorListAccounts',
+  'ConnectorPassthrough', 'ConnectorRecodeInvoiceLine', 'ConnectorSearchContacts',
+  'ConnectorSetInvoiceStatus',
+  'GenerateNewKey', 'GetTokens', 'Health', 'Signup',
+  'SubscriptionsCheckout', 'SubscriptionsPortal', 'SubscriptionsWebhook',
+  'Version', 'mcpConfig',
+].sort();
+
 test('every HTTP route stays anonymous — auth is per-handler by x-api-key', () => {
   const seen = [];
 
@@ -58,7 +77,12 @@ test('every HTTP route stays anonymous — auth is per-handler by x-api-key', ()
     }
   }
 
-  assert.ok(seen.length >= 27, `expected the full route surface, saw ${seen.length}: ${seen.join(', ')}`);
+  assert.deepEqual(
+    seen.sort(),
+    EXPECTED_ANONYMOUS_ROUTES,
+    'the anonymous route surface changed. Every route here is reachable unauthenticated, so ' +
+    'adding or removing one is a security decision — update this list deliberately.'
+  );
 });
 
 test('the public signup and key-minting endpoints stay disabled', () => {

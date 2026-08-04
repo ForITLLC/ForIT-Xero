@@ -53,23 +53,35 @@ export function calculateTimelineInterest(
   // Collect all balance-changing events (payments and credit notes)
   const events: Array<{ date: Date; amount: number; type: 'payment' | 'credit' }> = [];
 
-  // Add payments (Xero SDK returns lowercase property names)
+  // Payments and credit notes are read straight off the SDK shape now. Both
+  // fields are optional there, and a missing one cannot be defaulted:
+  // parseXeroDate(undefined) returns TODAY, which would move a balance change
+  // by however long it has been and bill the customer the difference. Refuse
+  // loudly instead — a failed accrual run is recoverable, a wrong invoice is
+  // not.
   if (invoice.payments && invoice.payments.length > 0) {
     for (const payment of invoice.payments) {
-      // Handle both PascalCase (types) and lowercase (actual SDK response)
-      const paymentDate = parseXeroDate((payment as any).date || payment.Date);
-      const paymentAmount = (payment as any).amount || payment.Amount;
-      events.push({ date: paymentDate, amount: paymentAmount, type: 'payment' });
+      if (!payment.date || typeof payment.amount !== 'number') {
+        throw new Error(
+          `Invoice ${invoice.invoiceNumber}: payment ${payment.paymentID ?? '(no id)'} has no usable ` +
+          `date or amount (date=${String(payment.date)}, amount=${String(payment.amount)}). ` +
+          'Refusing to place it on the interest timeline.'
+        );
+      }
+      events.push({ date: parseXeroDate(payment.date), amount: payment.amount, type: 'payment' });
     }
   }
 
-  // Add credit notes (Xero SDK returns lowercase property names)
   if (invoice.creditNotes && invoice.creditNotes.length > 0) {
     for (const cn of invoice.creditNotes) {
-      // Handle both PascalCase (types) and lowercase (actual SDK response)
-      const cnDate = parseXeroDate((cn as any).date || cn.Date);
-      const cnAmount = (cn as any).appliedAmount || cn.AppliedAmount;
-      events.push({ date: cnDate, amount: cnAmount, type: 'credit' });
+      if (!cn.date || typeof cn.appliedAmount !== 'number') {
+        throw new Error(
+          `Invoice ${invoice.invoiceNumber}: credit note ${cn.creditNoteID ?? '(no id)'} has no usable ` +
+          `date or applied amount (date=${String(cn.date)}, appliedAmount=${String(cn.appliedAmount)}). ` +
+          'Refusing to place it on the interest timeline.'
+        );
+      }
+      events.push({ date: parseXeroDate(cn.date), amount: cn.appliedAmount, type: 'credit' });
     }
   }
 

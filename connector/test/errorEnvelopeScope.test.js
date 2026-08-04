@@ -20,22 +20,22 @@ const { CONNECTOR_ROOT } = require('./helpers/harness');
 
 const FUNCTIONS_DIR = path.join(CONNECTOR_ROOT, 'src', 'functions');
 
-const WHY_CONNECTOR_IS_EXCLUDED =
-  'connector.ts is EXCLUDED ON PURPOSE. Its routes are gated by x-api-key -> an active ' +
-  'xero-connector subscription, and the messages they return are Xero validation text that ' +
-  "Ben's live Power Automate flows branch on. Making them opaque breaks working flows and " +
-  'hardens nothing — the caller is an authenticated customer, not the anonymous internet. ' +
-  'See the header comment in src/functions/connector.ts. If you mean to change this, change ' +
-  'this pin too, and check the Power Automate consumers first.';
+const WHY_THE_PASSTHROUGH_STAYS =
+  "connector.ts has TWO return paths and they are not the same thing. The Xero PASSTHROUGH " +
+  '(`!response.ok` -> responseText) carries Xero\'s own validation text at Xero\'s own status ' +
+  "code, and Ben's live Power Automate flows branch on it — it must keep flowing through. The " +
+  'CATCH blocks never carry Xero text; they fire on internal failures and used to hand an ' +
+  'anonymous caller the SQL server and login, a password fragment and a Key Vault secret name. ' +
+  'WO#1137 excluded this file believing both paths were Xero\'s; WO#1148 D3 drove all 28 routes ' +
+  'and found otherwise. See the header comment in src/functions/connector.ts.';
 
-// true  = anonymous surface, must return an opaque body via services/errors
-// false = deliberately excluded, see the reason above
+// true = returns an opaque body via services/errors on internal failure
 const EXPECTED_ENVELOPE_USE = {
   'mcpAuth.ts': true,
   'connect.ts': true,
   'subscriptions.ts': true,
   'health.ts': true,
-  'connector.ts': false,
+  'connector.ts': true, // catch blocks only — the Xero passthrough is untouched
   'keepAlive.ts': false, // timer-triggered, returns nothing to any caller
   'mcp.ts': false,
   'index.ts': false,
@@ -72,23 +72,32 @@ test('every anonymous surface uses the opaque error envelope', () => {
   }
 });
 
-test('connector.ts stays on raw Xero messages — deliberately', () => {
+test('connector.ts leaks no raw internal message from any catch block', () => {
   const source = readFunctionSource('connector.ts');
 
-  assert.ok(!usesEnvelope(source), WHY_CONNECTOR_IS_EXCLUDED);
-
-  // Pinned so that adding a route here is a decision, not a drift.
   const rawMessageSites = source.match(/error instanceof Error \? error\.message : String\(error\)/g) ?? [];
   assert.equal(
     rawMessageSites.length,
-    15,
-    `connector.ts has ${rawMessageSites.length} raw-message sites, pinned at 15. ` +
-    WHY_CONNECTOR_IS_EXCLUDED
+    0,
+    `connector.ts has ${rawMessageSites.length} raw-message sites; they must all go through ` +
+    `services/errors. ${WHY_THE_PASSTHROUGH_STAYS}`
+  );
+});
+
+test("connector.ts keeps passing Xero's own text through — that half is deliberate", () => {
+  const source = readFunctionSource('connector.ts');
+
+  // The passthrough is what live flows read. Losing it is as much a defect as
+  // the leak was; anonymousErrorPaths.test.js proves it still works end to end.
+  const passthroughSites = source.match(/jsonBody: \{ error: responseText \}/g) ?? [];
+  assert.ok(
+    passthroughSites.length >= 10,
+    `the Xero passthrough dropped to ${passthroughSites.length} sites. ${WHY_THE_PASSTHROUGH_STAYS}`
   );
 });
 
 test('the reason is written down where someone about to change it will look', () => {
   const source = readFunctionSource('connector.ts');
-  assert.match(source, /DELIBERATE/, 'the rationale header in connector.ts is gone');
+  assert.match(source, /TWO RETURN PATHS/, 'the rationale header in connector.ts is gone');
   assert.match(source, /Power Automate/, 'the rationale no longer names the consumer at risk');
 });

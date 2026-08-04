@@ -1,30 +1,37 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { validateApiKey, checkProductAccess, getXeroConnection } from '../services/database';
 import { refreshAndPersist } from '../services/xeroConnection';
+import { errorResponse } from '../services/errors';
 
 /**
  * Power Automate Custom Connector Endpoints
  * These endpoints expose Xero operations for Power Automate flows
  *
  * ---------------------------------------------------------------------------
- * DELIBERATE: this file does NOT use the opaque error envelope in
- * services/errors.ts, and its handlers return the underlying message to the
- * caller. That is not an oversight, and it is not the leak that WO#1137 fixed.
+ * TWO RETURN PATHS, AND THEY ARE NOT THE SAME THING. Keep them apart.
  *
- * Every route here is gated by `x-api-key` -> validateApiKey -> an active
- * `xero-connector` subscription, so the caller is an authenticated customer,
- * not the anonymous internet. The messages they receive are Xero's own
- * validation text ("Invoice not found", "Account code is invalid", and so on),
- * and Ben's live Power Automate flows read that text to branch on. Replacing it
- * with "Internal server error" would not harden anything meaningful — it would
- * break working flows in production.
+ * 1. THE XERO PASSTHROUGH — `if (!response.ok) return { status: response.status,
+ *    jsonBody: { error: responseText } }`. This is Xero's own validation text
+ *    ("Account code must be specified") at Xero's own status code, and Ben's
+ *    live Power Automate flows branch on it. It MUST keep flowing through
+ *    untouched. Making it opaque would break working flows and harden nothing.
  *
- * The anonymous surfaces — mcpAuth, connect, subscriptions, health — DO use the
- * envelope, because there the caller is unauthenticated and the messages carry
- * Key Vault, SQL and OAuth detail.
+ * 2. THE CATCH BLOCKS — these never carry Xero text. They fire when something
+ *    INTERNAL fails: Key Vault, the SQL pool, a token refresh, fetch itself.
+ *    They used to return `error.message` verbatim, which handed an anonymous
+ *    caller the SQL server and login, a password fragment and a Key Vault
+ *    secret name. WO#1137 excluded this file on the reasoning that its
+ *    messages were Xero's — true of path 1, false of path 2, and nobody had
+ *    driven the error paths to find out. WO#1148 D3 drove all 28 routes and
+ *    found it. They now use the opaque envelope in services/errors.ts.
  *
- * test/errorEnvelopeScope.test.js pins this split. If you intend to change it,
- * change the pin too, and check the Power Automate consumers first.
+ * Auth is still per-handler: `x-api-key` -> validateApiKey -> an active
+ * `xero-connector` subscription. That gates who gets a useful ANSWER; it does
+ * not gate who can reach the handler and make it fail.
+ *
+ * test/errorEnvelopeScope.test.js and test/anonymousErrorPaths.test.js pin both
+ * halves. If you intend to change either, change the pin too, and check the
+ * Power Automate consumers first.
  * ---------------------------------------------------------------------------
  */
 
@@ -127,8 +134,7 @@ async function getDefaultTenant(request: HttpRequest, context: InvocationContext
       },
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -185,8 +191,7 @@ async function getInvoices(request: HttpRequest, context: InvocationContext): Pr
     }
     return { status: 200, jsonBody: result };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -221,8 +226,7 @@ async function deletePayment(request: HttpRequest, context: InvocationContext): 
 
     return { status: 200, jsonBody: { success: true, message: 'Payment deleted' } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -270,8 +274,7 @@ async function setInvoiceStatus(request: HttpRequest, context: InvocationContext
     }
     return { status: 200, jsonBody: result };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -344,8 +347,7 @@ async function recodeInvoiceLine(request: HttpRequest, context: InvocationContex
     }
     return { status: 200, jsonBody: result };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -384,8 +386,7 @@ async function getInvoice(request: HttpRequest, context: InvocationContext): Pro
     }
     return { status: 200, jsonBody: result };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -423,8 +424,7 @@ async function getInvoicePayments(request: HttpRequest, context: InvocationConte
     }
     return { status: 200, jsonBody: { payments: invoice.Invoices[0].Payments || [] } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -464,8 +464,7 @@ async function searchContacts(request: HttpRequest, context: InvocationContext):
     }
     return { status: 200, jsonBody: { contacts: result.Contacts } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -507,8 +506,7 @@ async function createContact(request: HttpRequest, context: InvocationContext): 
     }
     return { status: 201, jsonBody: result.Contacts[0] };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -579,8 +577,7 @@ async function createInvoice(request: HttpRequest, context: InvocationContext): 
     }
     return { status: 201, jsonBody: result.Invoices[0] };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -617,8 +614,7 @@ async function listAccounts(request: HttpRequest, context: InvocationContext): P
     const filtered = type === 'ALL' ? result.Accounts : result.Accounts.filter(a => a.Type === type);
     return { status: 200, jsonBody: { accounts: filtered.map(a => ({ Code: a.Code, Name: a.Name, Type: a.Type })) } };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -698,8 +694,7 @@ async function createPayment(request: HttpRequest, context: InvocationContext): 
     }
     return { status: 201, jsonBody: result.Payments[0] };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -806,8 +801,7 @@ async function getContractorBalances(request: HttpRequest, context: InvocationCo
       },
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -906,8 +900,7 @@ async function getContactBalance(request: HttpRequest, context: InvocationContex
       },
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Connector request failed', error);
   }
 }
 
@@ -1253,9 +1246,7 @@ async function xeroPassthrough(request: HttpRequest, context: InvocationContext)
       return { status: response.status, body: responseText };
     }
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    context.error('Xero passthrough error', { error: message });
-    return { status: 500, jsonBody: { error: message } };
+    return errorResponse(context, 'Xero passthrough error', error);
   }
 }
 

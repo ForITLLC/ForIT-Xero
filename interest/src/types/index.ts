@@ -63,17 +63,27 @@ export interface XeroInvoice {
   creditNotes?: XeroCreditNote[];
 }
 
+/**
+ * These mirror xero-node 9.3.0's Payment and CreditNote, verified against the
+ * INSTALLED package: camelCase and optional. They previously declared
+ * PaymentID/Date/Amount, which the SDK has never returned — the code compiled
+ * only because `(payment as any).date || payment.Date` suppressed the check,
+ * and `payment.Date` was undefined on every real response.
+ *
+ * Keep these matching the SDK. If xero-node moves a field, this file is where
+ * the compiler should catch it.
+ */
 export interface XeroPayment {
-  PaymentID: string;
-  Date: string;
-  Amount: number;
+  paymentID?: string;
+  date?: string;
+  amount?: number;
 }
 
 export interface XeroCreditNote {
-  CreditNoteID: string;
-  Date: string;
-  Total: number;
-  AppliedAmount: number;
+  creditNoteID?: string;
+  date?: string;
+  total?: number;
+  appliedAmount?: number;
 }
 
 export interface XeroLineItem {
