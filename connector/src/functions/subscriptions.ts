@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import sql from 'mssql';
 import { getSecret, SECRETS } from '../services/keyvault';
 import { validateApiKey } from '../services/database';
+import { errorResponse, reportFailure } from '../services/errors';
 
 // Lazy-initialized Stripe client
 let stripeClient: Stripe | null = null;
@@ -270,13 +271,7 @@ async function subscriptionsCheckout(request: HttpRequest, context: InvocationCo
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Checkout failed', error);
-
-    return {
-      status: 500,
-      jsonBody: { error: errorMessage },
-    };
+    return errorResponse(context, 'Checkout failed', error);
   }
 }
 
@@ -306,12 +301,10 @@ async function subscriptionsWebhook(request: HttpRequest, context: InvocationCon
     try {
       event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
     } catch (err) {
-      const message = err instanceof Error ? err.message : 'Unknown error';
-      context.error('Webhook signature verification failed', err);
-      return {
+      return errorResponse(context, 'Webhook signature verification failed', err, {
         status: 400,
-        jsonBody: { error: `Webhook signature verification failed: ${message}` },
-      };
+        publicMessage: 'Webhook signature verification failed',
+      });
     }
 
     context.log('Webhook received', { type: event.type, id: event.id });
@@ -346,13 +339,7 @@ async function subscriptionsWebhook(request: HttpRequest, context: InvocationCon
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Webhook processing failed', error);
-
-    return {
-      status: 500,
-      jsonBody: { error: errorMessage },
-    };
+    return errorResponse(context, 'Webhook processing failed', error);
   }
 }
 
@@ -574,13 +561,7 @@ async function subscriptionsPortal(request: HttpRequest, context: InvocationCont
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Portal session failed', error);
-
-    return {
-      status: 500,
-      jsonBody: { error: errorMessage },
-    };
+    return errorResponse(context, 'Portal session failed', error);
   }
 }
 

@@ -1,6 +1,7 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from '@azure/functions';
 import { validateApiKey, getXeroConnection } from '../services/database';
 import { refreshAndPersist } from '../services/xeroConnection';
+import { errorResponse } from '../services/errors';
 
 /**
  * ForIT Xero Connector - MCP Token Endpoint
@@ -105,13 +106,7 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
     };
 
   } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    context.error('Failed to get tokens', error);
-
-    return {
-      status: 500,
-      jsonBody: { error: errorMessage },
-    };
+    return errorResponse(context, 'Failed to get tokens', error);
   }
 }
 

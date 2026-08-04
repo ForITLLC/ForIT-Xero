@@ -8,4 +8,5 @@ import './connect';
 import './subscriptions';
 import './mcp';
 import './keepAlive';
+import './health';
 // products and swag moved to forit-saas-api
