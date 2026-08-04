@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { getSecret, SECRETS } from '../services/keyvault';
 import { reportFailure } from '../services/errors';
 import { getWebhookObservations } from '../services/webhookState';
+import { getSubscriptionEvidence } from '../services/database';
 
 /**
  * GET /api/health
@@ -25,11 +26,13 @@ const CACHE_TTL_MS = 30_000;
 
 type Check = { ready: boolean; reason?: string; [key: string]: unknown };
 
-type ReadinessBasis = 'verified_event' | 'unproven' | 'credentials_missing';
+type ReadinessBasis = 'verified_event_persisted' | 'unproven' | 'credentials_missing';
 
 interface HealthPayload {
   status: 'ok' | 'unproven' | 'degraded';
   commit: string;
+  /** Alias of `commit`. The ForIT fleet monitor classifies a probe on a `sha` field. */
+  sha: string;
   built_at: string | null;
   checked_at: string;
   subscription_webhook_ready: boolean;
@@ -91,14 +94,16 @@ async function credentialChecks(context: InvocationContext): Promise<Record<stri
     return cachedCredentials.checks;
   }
 
-  const [stripeApi, stripeWebhook] = await Promise.all([
+  const [stripeApi, stripeWebhook, provisioning] = await Promise.all([
     checkCredential(context, 'stripe_api_credential', SECRETS.STRIPE_SECRET_KEY),
     checkCredential(context, 'stripe_webhook_signing_credential', SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET),
+    provisioningCheck(context),
   ]);
 
   const checks = {
     stripe_api_credential: stripeApi,
     stripe_webhook_signing_credential: stripeWebhook,
+    subscription_provisioning_observed: provisioning,
   };
 
   cachedCredentials = { at: now, checks };
@@ -109,39 +114,65 @@ const READINESS_NOTES: Record<ReadinessBasis, string> = {
   credentials_missing:
     'A Stripe credential could not be read from Key Vault. The webhook cannot run.',
   unproven:
-    'Both credentials resolve and the handler is covered by signature tests, but no real Stripe event ' +
-    'has verified against this signing secret on this instance. Stripe does not disclose a signing ' +
-    'secret on list or retrieve, so the secret is matched to the endpoint by elimination, not proven. ' +
-    'Only a real event settles it.',
-  verified_event:
-    'A real Stripe event verified against the configured signing secret on this instance.',
+    'Both credentials resolve and the handler is covered by signature tests, but no Stripe event has ' +
+    'yet verified AND provisioned a subscription. Stripe does not disclose a signing secret on list or ' +
+    'retrieve, so the secret is matched to the endpoint by elimination, not proven. Only a real event ' +
+    'that provisions settles it.',
+  verified_event_persisted:
+    'A real Stripe event verified against the configured signing secret and provisioned a subscription. ' +
+    'This evidence is read from the database, so it holds across a recycle and from any instance.',
 };
+
+/**
+ * Durable evidence, read through the same 30s window as the credential checks.
+ * A database that cannot be reached is reported as unknown — never as readiness
+ * and never as a fault, because the connector itself is not broken.
+ */
+async function provisioningCheck(context: InvocationContext): Promise<Check> {
+  try {
+    const evidence = await getSubscriptionEvidence();
+    return {
+      ready: evidence.provisioned > 0,
+      ...(evidence.provisioned === 0 ? { reason: 'no_subscription_ever_provisioned' } : {}),
+      scope: 'durable_cross_instance',
+      provisioned_count: evidence.provisioned,
+      last_write_at: evidence.lastWriteAt,
+    };
+  } catch (error) {
+    reportFailure(context, 'Health check failed: subscription_provisioning_observed', error);
+    return { ready: false, reason: 'unavailable', scope: 'durable_cross_instance' };
+  }
+}
 
 async function buildPayload(context: InvocationContext): Promise<HealthPayload> {
   const checks = await credentialChecks(context);
   const credentialsReady =
     checks.stripe_api_credential.ready && checks.stripe_webhook_signing_credential.ready;
 
-  // Read fresh, never cached: this is the evidence the readiness claim rests on.
+  const provisioning = checks.subscription_provisioning_observed;
+
+  // Read fresh, never cached: in-process counters cost nothing to read and
+  // must not be stale.
   const observed = getWebhookObservations();
 
   const basis: ReadinessBasis = !credentialsReady
     ? 'credentials_missing'
-    : observed.verifiedCount > 0
-      ? 'verified_event'
+    : provisioning.ready
+      ? 'verified_event_persisted'
       : 'unproven';
 
   const { commit, built_at } = getBuildInfo();
 
   return {
-    // 'ok' is a claim about Stripe, and only a verified event can support it.
+    // 'ok' is a claim about Stripe, and only durable evidence supports it.
     // 'unproven' is not an alarm — nothing is known to be broken — but it is
     // not health either, and subscription_webhook_ready stays false for it.
-    status: basis === 'verified_event' ? 'ok' : basis === 'unproven' ? 'unproven' : 'degraded',
+    status: basis === 'verified_event_persisted' ? 'ok' : basis === 'unproven' ? 'unproven' : 'degraded',
     commit,
+    sha: commit,
     built_at,
     checked_at: new Date().toISOString(),
-    subscription_webhook_ready: basis === 'verified_event',
+    subscription_webhook_ready: basis === 'verified_event_persisted',
     readiness_basis: basis,
     readiness_note: READINESS_NOTES[basis],
     checks: {
@@ -149,6 +180,9 @@ async function buildPayload(context: InvocationContext): Promise<HealthPayload> 
       stripe_signature_verified: {
         ready: observed.verifiedCount > 0,
         ...(observed.verifiedCount === 0 ? { reason: 'no_verified_event_observed_by_this_instance' } : {}),
+        // This process only. Observed 2026-08-04: a restart took these to zero
+        // on an unchanged commit, so they can never carry a readiness claim.
+        scope: 'this_instance_only',
         verified_count: observed.verifiedCount,
         last_verified_at: observed.lastVerifiedAt,
         // Reported, never alarmed on: this route is public and anonymous, so
@@ -174,9 +208,35 @@ async function health(_request: HttpRequest, context: InvocationContext): Promis
   };
 }
 
+/**
+ * GET /api/version
+ *
+ * The ForIT fleet monitor (for-Inventory, inventory.AppEndpoints) probes
+ * `version_path` — '/api/version' — and classifies the result on a `sha` field:
+ * 404 is 'not_found', and a 200 without a sha is 'degraded'. This connector is
+ * registered there and monitored, but had no such route, so it was dark. This
+ * is the cheapest possible surface that answers it honestly.
+ */
+async function version(_request: HttpRequest, _context: InvocationContext): Promise<HttpResponseInit> {
+  const { commit, built_at } = getBuildInfo();
+
+  return {
+    status: 200,
+    headers: { 'Cache-Control': 'no-store' },
+    jsonBody: { sha: commit, commit, built_at },
+  };
+}
+
 app.http('Health', {
   methods: ['GET'],
   authLevel: 'anonymous',
   route: 'health',
   handler: health,
+});
+
+app.http('Version', {
+  methods: ['GET'],
+  authLevel: 'anonymous',
+  route: 'version',
+  handler: version,
 });

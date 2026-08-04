@@ -73,6 +73,36 @@ async function getDbPool(): Promise<sql.ConnectionPool> {
 // Aliases for backwards compatibility
 const getSaasPool = getDbPool;
 
+/**
+ * Durable, cross-instance evidence that the subscription webhook has actually
+ * worked — not merely that a signature verified.
+ *
+ * `stripe_subscription_id` on customer_products is written by exactly one code
+ * path: the Stripe webhook handlers. So a row carrying one is proof that a real
+ * event arrived, verified against the configured signing secret, matched a
+ * customer and a product, and provisioned something. Unlike an in-process
+ * counter it survives a recycle and is the same answer from any instance —
+ * which matters here because this app is Consumption (alwaysOn=false, scale
+ * limit 200), so it goes cold between events and health can be served by an
+ * instance that has never seen one.
+ */
+export async function getSubscriptionEvidence(): Promise<{ provisioned: number; lastWriteAt: string | null }> {
+  const request = await requestOn();
+  const result = await request.query(
+    `SELECT COUNT(*) AS provisioned, MAX(updated_at) AS last_write_at
+       FROM xero.customer_products
+      WHERE stripe_subscription_id IS NOT NULL`
+  );
+
+  const row = result.recordset[0] as { provisioned?: number; last_write_at?: Date | string | null } | undefined;
+  const lastWrite = row?.last_write_at ?? null;
+
+  return {
+    provisioned: row?.provisioned ?? 0,
+    lastWriteAt: lastWrite instanceof Date ? lastWrite.toISOString() : lastWrite,
+  };
+}
+
 // A query can run on either the shared pool or a pinned transaction.
 type DbExecutor = sql.ConnectionPool | sql.Transaction;
 

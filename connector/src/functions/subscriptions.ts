@@ -163,19 +163,52 @@ async function getProductByStripePrice(stripePriceId: string): Promise<string | 
   return result.recordset[0]?.id || null;
 }
 
+function toDate(epochSeconds: unknown): Date | null {
+  if (typeof epochSeconds !== 'number' || !Number.isFinite(epochSeconds)) return null;
+  const date = new Date(epochSeconds * 1000);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
 /**
- * Extract period dates from a Stripe subscription
+ * Extract the current billing period from a Stripe subscription.
+ *
+ * Stripe moved `current_period_start` / `current_period_end` off the
+ * subscription and onto its ITEMS. stripe-node 20.1.0's `Subscription` type
+ * carries no `current_period_*` field at all — the previous implementation read
+ * them through an `as unknown as { current_period_start: number }` cast, which
+ * silenced the very type error that would have caught it. Both dates came back
+ * `new Date(undefined * 1000)` — an Invalid Date, handed to a DateTime2
+ * parameter. This had never executed in production only because the webhook
+ * 500'd on secret lookup before reaching any of it (WO#1137/#1142); it would
+ * have fired on the first real event.
+ *
+ * The item is read first, the legacy top-level fields second (an older pinned
+ * api_version still sends those), and if neither is present we return nulls and
+ * say so rather than writing a garbage date.
  */
-function getSubscriptionPeriod(subscription: Stripe.Subscription): { startsAt: Date; endsAt: Date } {
-  // Access the subscription properties - they exist on the object even if TypeScript types are incomplete
-  const sub = subscription as unknown as {
-    current_period_start: number;
-    current_period_end: number;
+function getSubscriptionPeriod(
+  subscription: Stripe.Subscription,
+  context: InvocationContext
+): { startsAt: Date | null; endsAt: Date | null } {
+  const item = subscription.items?.data?.[0] as unknown as
+    | { current_period_start?: number; current_period_end?: number }
+    | undefined;
+  const legacy = subscription as unknown as {
+    current_period_start?: number;
+    current_period_end?: number;
   };
-  return {
-    startsAt: new Date(sub.current_period_start * 1000),
-    endsAt: new Date(sub.current_period_end * 1000),
-  };
+
+  const startsAt = toDate(item?.current_period_start ?? legacy.current_period_start);
+  const endsAt = toDate(item?.current_period_end ?? legacy.current_period_end);
+
+  if (!startsAt || !endsAt) {
+    context.warn('Subscription billing period unavailable — recording the subscription without it', {
+      subscriptionId: subscription.id,
+      hasItem: Boolean(item),
+    });
+  }
+
+  return { startsAt, endsAt };
 }
 
 // ============================================================================
@@ -364,7 +397,7 @@ async function handleCheckoutCompleted(session: Stripe.Checkout.Session, context
   const stripe = await getStripe();
   const subscription = await stripe.subscriptions.retrieve(subscriptionId);
 
-  const { startsAt, endsAt } = getSubscriptionPeriod(subscription);
+  const { startsAt, endsAt } = getSubscriptionPeriod(subscription, context);
 
   // Map Stripe status to our status
   const status = mapStripeStatus(subscription.status);
@@ -405,7 +438,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, cont
       const foritCustomerId = (customer as Stripe.Customer).metadata?.forit_customer_id;
 
       if (productId && foritCustomerId) {
-        const { startsAt, endsAt } = getSubscriptionPeriod(subscription);
+        const { startsAt, endsAt } = getSubscriptionPeriod(subscription, context);
         const status = mapStripeStatus(subscription.status);
 
         await updateCustomerProductSubscription(
@@ -431,7 +464,7 @@ async function handleSubscriptionUpdated(subscription: Stripe.Subscription, cont
     return;
   }
 
-  const { startsAt, endsAt } = getSubscriptionPeriod(subscription);
+  const { startsAt, endsAt } = getSubscriptionPeriod(subscription, context);
   const status = mapStripeStatus(subscription.status);
 
   await updateCustomerProductSubscription(

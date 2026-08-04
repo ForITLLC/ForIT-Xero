@@ -41,8 +41,9 @@ function forbidden() {
 }
 
 const NOTHING_OBSERVED = { verifiedCount: 0, rejectedCount: 0, lastVerifiedAt: null, lastRejectedAt: null };
+const NO_DURABLE_EVIDENCE = { provisioned: 0, lastWriteAt: null };
 
-async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED) {
+async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED, evidence = NO_DURABLE_EVIDENCE) {
   const restore = [];
   for (const [key, value] of Object.entries(env)) {
     restore.push([key, process.env[key]]);
@@ -55,6 +56,12 @@ async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED) 
         getWebhookObservations: () => observations,
         recordVerifiedEvent: () => {},
         recordRejectedSignature: () => {},
+      },
+      'services/database.js': {
+        getSubscriptionEvidence: async () => {
+          if (evidence instanceof Error) throw evidence;
+          return evidence;
+        },
       },
     });
     const context = makeContext();
@@ -126,22 +133,72 @@ test('resolvable credentials alone are NOT readiness — that is a claim about S
   );
   // Not an alarm: nothing is known to be broken.
   assert.equal(response.status, 200);
-  assert.match(response.jsonBody.readiness_note, /only a real event settles it/i);
+  assert.match(response.jsonBody.readiness_note, /only a real event that provisions settles it/i);
 });
 
-test('readiness flips true only once a real event has verified', async () => {
-  const { response } = await callHealth(async () => 'value', { BUILD_COMMIT: 'abc123' }, {
-    verifiedCount: 1,
-    rejectedCount: 0,
-    lastVerifiedAt: '2026-08-04T12:00:00.000Z',
-    lastRejectedAt: null,
+const VERIFIED_IN_PROCESS = {
+  verifiedCount: 5,
+  rejectedCount: 0,
+  lastVerifiedAt: '2026-08-04T12:00:00.000Z',
+  lastRejectedAt: null,
+};
+
+test('an in-process verified count is NOT readiness — it does not survive a recycle', async () => {
+  // Observed 2026-08-04: an app restart took rejected_count 2 -> 0 on the same
+  // commit. This app is Consumption (Y1, alwaysOn=false, scale limit 200), so
+  // it goes cold between events and can serve health from an instance that
+  // never saw one. Readiness keyed on process memory can never be true when it
+  // matters.
+  const { response } = await callHealth(async () => 'value', {}, VERIFIED_IN_PROCESS, NO_DURABLE_EVIDENCE);
+
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
+  assert.equal(response.jsonBody.readiness_basis, 'unproven');
+  // Still reported — it is real evidence, just scoped to one process.
+  assert.equal(response.jsonBody.checks.stripe_signature_verified.verified_count, 5);
+  assert.equal(response.jsonBody.checks.stripe_signature_verified.scope, 'this_instance_only');
+});
+
+test('durable evidence makes it ready on an instance that has verified nothing', async () => {
+  const { response } = await callHealth(async () => 'value', {}, NOTHING_OBSERVED, {
+    provisioned: 3,
+    lastWriteAt: '2026-08-04T12:00:00.000Z',
   });
 
   assert.equal(response.status, 200);
   assert.equal(response.jsonBody.status, 'ok');
   assert.equal(response.jsonBody.subscription_webhook_ready, true);
-  assert.equal(response.jsonBody.readiness_basis, 'verified_event');
-  assert.equal(response.jsonBody.checks.stripe_signature_verified.last_verified_at, '2026-08-04T12:00:00.000Z');
+  assert.equal(response.jsonBody.readiness_basis, 'verified_event_persisted');
+  assert.equal(response.jsonBody.checks.subscription_provisioning_observed.ready, true);
+  assert.equal(response.jsonBody.checks.subscription_provisioning_observed.scope, 'durable_cross_instance');
+  assert.equal(response.jsonBody.checks.subscription_provisioning_observed.last_write_at, '2026-08-04T12:00:00.000Z');
+});
+
+test('readiness means subscriptions were provisioned, not merely that signatures verify', async () => {
+  // The distinction D3 exists for: the door opening is not the floor holding.
+  const { response } = await callHealth(async () => 'value', {}, VERIFIED_IN_PROCESS, {
+    provisioned: 0,
+    lastWriteAt: null,
+  });
+
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
+  assert.match(response.jsonBody.readiness_note, /provision/i);
+});
+
+test('an unreachable database does not fabricate readiness or a fault', async () => {
+  const { response } = await callHealth(
+    async () => 'value',
+    {},
+    NOTHING_OBSERVED,
+    Object.assign(new Error('Login failed for user'), { code: 'ELOGIN' })
+  );
+
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
+  assert.equal(response.jsonBody.checks.subscription_provisioning_observed.ready, false);
+  assert.equal(response.jsonBody.checks.subscription_provisioning_observed.reason, 'unavailable');
+  // Credentials are fine, so this is not a hard fault.
+  assert.equal(response.status, 200);
+  // And it must not leak the database error to an anonymous caller.
+  assert.ok(!clientVisible(response).includes('Login failed'));
 });
 
 test('rejected signatures are reported but never on their own claim readiness', async () => {
