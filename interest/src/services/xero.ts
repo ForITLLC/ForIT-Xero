@@ -1,4 +1,4 @@
-import { XeroClient, Invoice } from 'xero-node';
+import { XeroClient, Invoice, CurrencyCode } from 'xero-node';
 import { getSecret, SECRETS } from './keyvault';
 import { sendFailureNotification } from './notifications';
 import {
@@ -7,6 +7,76 @@ import {
   CreateCreditNoteRequest,
 } from '../types';
 import { formatXeroDate } from '../utils/dates';
+
+/**
+ * Xero's SDK types every response field as optional, so reading one straight
+ * into a required field is a claim that nothing checks. The `as any` casts that
+ * used to sit on these responses suppressed exactly that check — the same habit
+ * that let a payment with no date be dated TODAY and mis-billed. If Xero ever
+ * omits one of these, fail here with the field named rather than propagate an
+ * undefined into a ledger row.
+ */
+function required<T>(value: T | undefined | null, field: string): T {
+  if (value === undefined || value === null) {
+    throw new Error(`Xero response is missing ${field}; refusing to continue with an incomplete record.`);
+  }
+  return value;
+}
+
+/**
+ * The SDK's Invoice and our XeroInvoice are not the same type, and
+ * `as unknown as XeroInvoice` asserted they were. Every field on the SDK type
+ * is optional; the interest maths cannot run without a few of them. Check those
+ * at the boundary, name the invoice when one is missing, and let the rest be
+ * as optional as Xero actually makes them.
+ */
+const XERO_INVOICE_STATUSES = ['DRAFT', 'SUBMITTED', 'AUTHORISED', 'PAID', 'VOIDED', 'DELETED'] as const;
+
+/**
+ * Invoice.StatusEnum is string-valued at runtime in xero-node 9.3.0 (verified
+ * in the compiled JS, not assumed — a numeric enum would make this nonsense),
+ * but TypeScript will not narrow an enum to a literal union for free. Check the
+ * value instead of asserting it, so an unrecognised status is a loud failure
+ * rather than a string that flows on into the ledger.
+ */
+/**
+ * CurrencyCode is likewise string-valued at runtime in 9.3.0 (169 members,
+ * CAD -> "CAD"). Check membership rather than assert it, so a bad currency
+ * fails here instead of on Xero's side mid-invoice-creation.
+ */
+function toCurrencyCode(code: string | undefined): CurrencyCode | undefined {
+  if (!code) return undefined;
+  const known = Object.values(CurrencyCode) as string[];
+  if (!known.includes(code)) {
+    throw new Error(`Unrecognised currency code "${code}" — refusing to create an invoice with it.`);
+  }
+  // Guarded one line above by a real membership check, which is the whole
+  // difference between this and the casts this sweep removed.
+  return code as unknown as CurrencyCode;
+}
+
+function toInvoiceStatus(status: Invoice.StatusEnum | undefined, invoiceId?: string): XeroInvoice['status'] {
+  const value = String(required(status, `status on invoice ${invoiceId}`));
+  if (!(XERO_INVOICE_STATUSES as readonly string[]).includes(value)) {
+    throw new Error(`Xero returned an unrecognised invoice status "${value}" on invoice ${invoiceId}`);
+  }
+  return value as XeroInvoice['status'];
+}
+
+function toXeroInvoice(inv: Invoice): XeroInvoice {
+  const id = inv.invoiceID;
+  return {
+    ...(inv as unknown as XeroInvoice),
+    invoiceID: required(id, 'invoiceID on an invoice'),
+    invoiceNumber: required(inv.invoiceNumber, `invoiceNumber on invoice ${id}`),
+    status: toInvoiceStatus(inv.status, id),
+    dueDate: required(inv.dueDate, `dueDate on invoice ${id}`),
+    date: required(inv.date, `date on invoice ${id}`),
+    amountDue: required(inv.amountDue, `amountDue on invoice ${id}`),
+    total: required(inv.total, `total on invoice ${id}`),
+  };
+}
+
 
 let xeroClient: XeroClient | null = null;
 let tenantId: string | null = null;
@@ -109,7 +179,7 @@ export async function getXeroClient(): Promise<XeroClient> {
       refresh_token: tokens.refresh_token,
       expires_at: tokens.expires_at,
       token_type: 'Bearer',
-    } as any);
+    });
 
     console.log(`Xero access token set, expires at ${new Date(tokenExpiresAt).toISOString()}`);
 
@@ -193,7 +263,7 @@ export async function getOverdueInvoices(
     false // summaryOnly=false to get payments
   );
 
-  return (response.body.invoices || []) as unknown as XeroInvoice[];
+  return (response.body.invoices || []).map(toXeroInvoice);
 }
 
 /**
@@ -206,7 +276,7 @@ export async function getInvoice(invoiceId: string): Promise<XeroInvoice | null>
   try {
     const response = await client.accountingApi.getInvoice(xeroTenantId, invoiceId);
     const invoices = response.body.invoices || [];
-    return invoices.length > 0 ? (invoices[0] as unknown as XeroInvoice) : null;
+    return invoices.length > 0 ? toXeroInvoice(invoices[0]) : null;
   } catch (error) {
     return null;
   }
@@ -237,7 +307,7 @@ export async function getInvoiceByNumber(invoiceNumber: string): Promise<XeroInv
     );
 
     const invoices = response.body.invoices || [];
-    return invoices.length > 0 ? (invoices[0] as unknown as XeroInvoice) : null;
+    return invoices.length > 0 ? toXeroInvoice(invoices[0]) : null;
   } catch (error) {
     return null;
   }
@@ -296,10 +366,10 @@ export async function createInvoice(request: CreateInvoiceRequest): Promise<{
     throw new Error('Failed to create invoice - no invoice returned');
   }
 
-  const created = createdInvoices[0] as any;
+  const created = createdInvoices[0];
   return {
-    invoiceId: created.invoiceID,
-    invoiceNumber: created.invoiceNumber,
+    invoiceId: required(created.invoiceID, 'invoiceID on the created invoice'),
+    invoiceNumber: required(created.invoiceNumber, 'invoiceNumber on the created invoice'),
   };
 }
 
@@ -342,10 +412,10 @@ export async function createCreditNote(request: CreateCreditNoteRequest): Promis
     throw new Error('Failed to create credit note - no credit note returned');
   }
 
-  const created = createdNotes[0] as any;
+  const created = createdNotes[0];
   return {
-    creditNoteId: created.creditNoteID,
-    creditNoteNumber: created.creditNoteNumber,
+    creditNoteId: required(created.creditNoteID, 'creditNoteID on the created credit note'),
+    creditNoteNumber: required(created.creditNoteNumber, 'creditNoteNumber on the created credit note'),
   };
 }
 
@@ -479,7 +549,7 @@ export async function updateInvoiceLineItems(
     {
       invoices: [{
         invoiceID: invoiceId,
-        lineItems: lineItems as any,
+        lineItems,
       }],
     }
   );
@@ -597,13 +667,13 @@ export async function createItem(
         accountCode,
         taxType: 'NONE',
       },
-    } as any],
+    }],
   });
 
-  const created = (response.body.items || [])[0] as any;
+  const created = (response.body.items || [])[0];
   return {
-    itemId: created.itemID,
-    code: created.code,
+    itemId: required(created.itemID, 'itemID on the created item'),
+    code: required(created.code, 'code on the created item'),
   };
 }
 
@@ -704,10 +774,10 @@ export async function getOrCreateInterestInvoice(
 
   const existing = response.body.invoices || [];
   if (existing.length > 0) {
-    const inv = existing[0] as any;
+    const inv = existing[0];
     return {
-      invoiceId: inv.invoiceID,
-      invoiceNumber: inv.invoiceNumber,
+      invoiceId: required(inv.invoiceID, 'invoiceID on the existing invoice'),
+      invoiceNumber: required(inv.invoiceNumber, 'invoiceNumber on the existing invoice'),
       isNew: false,
     };
   }
@@ -738,14 +808,14 @@ export async function getOrCreateInterestInvoice(
       reference: reference,
       status: Invoice.StatusEnum.DRAFT,
       lineItems: [lineItem],
-      currencyCode: currencyCode,
-    } as any],
+      currencyCode: toCurrencyCode(currencyCode),
+    }],
   });
 
-  const created = (createResponse.body.invoices || [])[0] as any;
+  const created = (createResponse.body.invoices || [])[0];
   return {
-    invoiceId: created.invoiceID,
-    invoiceNumber: created.invoiceNumber,
+    invoiceId: required(created.invoiceID, 'invoiceID on the created invoice'),
+    invoiceNumber: required(created.invoiceNumber, 'invoiceNumber on the created invoice'),
     isNew: true,
   };
 }

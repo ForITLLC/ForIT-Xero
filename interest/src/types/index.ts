@@ -55,6 +55,8 @@ export interface XeroInvoice {
   status: 'DRAFT' | 'SUBMITTED' | 'AUTHORISED' | 'PAID' | 'VOIDED' | 'DELETED';
   dueDate: string;
   date: string;
+  /** Present on the SDK's Invoice; used by the debug check-invoice route. */
+  reference?: string;
   amountDue: number;
   amountPaid: number;
   total: number;
@@ -162,8 +164,18 @@ export interface DryRunRequest {
   asOfDate?: string;            // Calculate as of this date (default: now)
 }
 
+/**
+ * The dry-run handler deliberately returns a REDUCED sourceInvoice — four
+ * fields, not a whole invoice. `results: AccrualResult[]` claimed otherwise and
+ * an `as any` at the call site kept the compiler quiet about the difference.
+ * Declare the projection that is actually sent.
+ */
 export interface DryRunResponse {
-  results: AccrualResult[];
+  results: Array<Omit<AccrualResult, 'calculations'> & {
+    calculations: Array<Omit<AccrualResult['calculations'][number], 'sourceInvoice'> & {
+      sourceInvoice: Pick<XeroInvoice, 'invoiceID' | 'invoiceNumber' | 'amountDue' | 'dueDate'>;
+    }>;
+  }>;
   totalInterest: number;
   invoicesWouldCreate: number;
   timestamp: string;

@@ -26,7 +26,7 @@ async function compareInterest(request: HttpRequest, context: InvocationContext)
       tenantId, undefined, paidniceWhere, 'Date DESC',
       undefined, undefined, undefined, undefined, undefined, false, false, undefined, false
     );
-    const paidniceInvoices = (paidniceResponse.body.invoices || []) as any[];
+    const paidniceInvoices = (paidniceResponse.body.invoices || []);
 
     // Group Paidnice charges by source invoice number
     const paidniceBySource: Record<string, { total: number; count: number; invoices: string[] }> = {};
@@ -40,7 +40,7 @@ async function compareInterest(request: HttpRequest, context: InvocationContext)
         }
         paidniceBySource[sourceNum].total += inv.total || 0;
         paidniceBySource[sourceNum].count++;
-        paidniceBySource[sourceNum].invoices.push(inv.invoiceNumber);
+        paidniceBySource[sourceNum].invoices.push(inv.invoiceNumber ?? '(no invoice number)');
       }
     }
 
@@ -67,7 +67,7 @@ async function compareInterest(request: HttpRequest, context: InvocationContext)
     let totalOurs = 0;
     let totalPaidnice = 0;
 
-    for (const inv of overdueInvoices as any[]) {
+    for (const inv of overdueInvoices) {
       const dueDate = new Date(inv.dueDate);
       const daysOverdue = Math.floor((asOfDate.getTime() - dueDate.getTime()) / (1000 * 60 * 60 * 24));
       const effectiveDays = Math.max(0, daysOverdue - gracePeriod);
