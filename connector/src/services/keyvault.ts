@@ -43,5 +43,15 @@ export const SECRETS = {
   PORTAL_API_KEY: 'PORTAL-API-KEY',
   // Stripe integration
   STRIPE_SECRET_KEY: 'STRIPE-SECRET-KEY',
-  STRIPE_WEBHOOK_SECRET: 'STRIPE-WEBHOOK-SECRET',
+  /**
+   * Signing secret for the Stripe webhook endpoint that targets
+   * POST /api/subscriptions/webhook (Stripe endpoint we_1SsEEyGbYYRlpik5o6rUx5aK).
+   *
+   * This used to read 'STRIPE-WEBHOOK-SECRET', a name that has never existed in
+   * forit-xero-mcp-kv, so every call 500'd on lookup and no Stripe event was
+   * ever verified. The name is deliberately specific: this ForIT Stripe account
+   * runs three webhook endpoints, and a secret called "the Stripe webhook
+   * secret" is the ambiguity that caused the outage.
+   */
+  STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: 'STRIPE-SUBSCRIPTION-WEBHOOK-SECRET',
 };
