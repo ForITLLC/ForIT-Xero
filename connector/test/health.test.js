@@ -15,7 +15,7 @@ const SECRETS = {
   XERO_TENANT_ID: 'xero-tenant-id',
   PORTAL_API_KEY: 'PORTAL-API-KEY',
   STRIPE_SECRET_KEY: 'STRIPE-SECRET-KEY',
-  STRIPE_WEBHOOK_SECRET: 'STRIPE-WEBHOOK-SECRET',
+  STRIPE_SUBSCRIPTION_WEBHOOK_SECRET: 'STRIPE-SUBSCRIPTION-WEBHOOK-SECRET',
 };
 
 function keyvaultStub(behaviour) {
@@ -40,7 +40,9 @@ function forbidden() {
   throw error;
 }
 
-async function callHealth(behaviour, env = {}) {
+const NOTHING_OBSERVED = { verifiedCount: 0, rejectedCount: 0, lastVerifiedAt: null, lastRejectedAt: null };
+
+async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED) {
   const restore = [];
   for (const [key, value] of Object.entries(env)) {
     restore.push([key, process.env[key]]);
@@ -49,6 +51,11 @@ async function callHealth(behaviour, env = {}) {
   try {
     const { handlers } = loadFunctions('functions/health.js', {
       'services/keyvault.js': keyvaultStub(behaviour),
+      'services/webhookState.js': {
+        getWebhookObservations: () => observations,
+        recordVerifiedEvent: () => {},
+        recordRejectedSignature: () => {},
+      },
     });
     const context = makeContext();
     const response = await handlers.Health(makeRequest(), context);
@@ -104,16 +111,72 @@ test('degrades to "unknown" rather than throwing when nothing stamped the build'
   }
 });
 
-test('is green only when the webhook can actually run', async () => {
+test('resolvable credentials alone are NOT readiness — that is a claim about Stripe', async () => {
+  // The handler is correct and both secrets read. That still does not prove the
+  // signing secret is the one Stripe signs with.
   const { response } = await callHealth(async () => 'value', { BUILD_COMMIT: 'abc123' });
+
+  assert.equal(response.jsonBody.status, 'unproven');
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
+  assert.equal(response.jsonBody.readiness_basis, 'unproven');
+  assert.equal(response.jsonBody.checks.stripe_signature_verified.ready, false);
+  assert.equal(
+    response.jsonBody.checks.stripe_signature_verified.reason,
+    'no_verified_event_observed_by_this_instance'
+  );
+  // Not an alarm: nothing is known to be broken.
+  assert.equal(response.status, 200);
+  assert.match(response.jsonBody.readiness_note, /only a real event settles it/i);
+});
+
+test('readiness flips true only once a real event has verified', async () => {
+  const { response } = await callHealth(async () => 'value', { BUILD_COMMIT: 'abc123' }, {
+    verifiedCount: 1,
+    rejectedCount: 0,
+    lastVerifiedAt: '2026-08-04T12:00:00.000Z',
+    lastRejectedAt: null,
+  });
+
   assert.equal(response.status, 200);
   assert.equal(response.jsonBody.status, 'ok');
   assert.equal(response.jsonBody.subscription_webhook_ready, true);
+  assert.equal(response.jsonBody.readiness_basis, 'verified_event');
+  assert.equal(response.jsonBody.checks.stripe_signature_verified.last_verified_at, '2026-08-04T12:00:00.000Z');
+});
+
+test('rejected signatures are reported but never on their own claim readiness', async () => {
+  const { response } = await callHealth(async () => 'value', {}, {
+    verifiedCount: 0,
+    rejectedCount: 42,
+    lastVerifiedAt: null,
+    lastRejectedAt: '2026-08-04T12:00:00.000Z',
+  });
+
+  assert.equal(response.jsonBody.checks.stripe_signature_verified.rejected_count, 42);
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
+  // The route is public: anyone can drive rejections up with junk, so they must
+  // not flip the connector to 'degraded' on their own.
+  assert.equal(response.jsonBody.status, 'unproven');
+  assert.equal(response.status, 200);
+});
+
+test('a missing credential still goes hard red', async () => {
+  const { response } = await callHealth(
+    async (name) => (name === SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET ? notFound() : 'value'),
+    {},
+    { verifiedCount: 5, rejectedCount: 0, lastVerifiedAt: '2026-08-04T12:00:00.000Z', lastRejectedAt: null }
+  );
+
+  // Even with verified events on record, an unreadable credential wins.
+  assert.equal(response.status, 503);
+  assert.equal(response.jsonBody.status, 'degraded');
+  assert.equal(response.jsonBody.readiness_basis, 'credentials_missing');
+  assert.equal(response.jsonBody.subscription_webhook_ready, false);
 });
 
 test('stays red — and answers 503, not 200 — while the signing credential is missing', async () => {
   const { response } = await callHealth(
-    async (name) => (name === SECRETS.STRIPE_WEBHOOK_SECRET ? notFound() : 'value'),
+    async (name) => (name === SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET ? notFound() : 'value'),
     { BUILD_COMMIT: 'abc123' }
   );
 
@@ -128,14 +191,14 @@ test('stays red — and answers 503, not 200 — while the signing credential is
 
 test('distinguishes "cannot read it" from "it is not there"', async () => {
   const { response } = await callHealth(
-    async (name) => (name === SECRETS.STRIPE_WEBHOOK_SECRET ? forbidden() : 'value')
+    async (name) => (name === SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET ? forbidden() : 'value')
   );
   assert.equal(response.jsonBody.checks.stripe_webhook_signing_credential.reason, 'access_denied');
 });
 
 test('does not hand out vault or secret names', async () => {
   const { response } = await callHealth(
-    async (name) => (name === SECRETS.STRIPE_WEBHOOK_SECRET ? notFound() : 'value')
+    async (name) => (name === SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET ? notFound() : 'value')
   );
 
   const visible = clientVisible(response);

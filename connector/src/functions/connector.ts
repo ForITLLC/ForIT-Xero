@@ -5,6 +5,27 @@ import { refreshAndPersist } from '../services/xeroConnection';
 /**
  * Power Automate Custom Connector Endpoints
  * These endpoints expose Xero operations for Power Automate flows
+ *
+ * ---------------------------------------------------------------------------
+ * DELIBERATE: this file does NOT use the opaque error envelope in
+ * services/errors.ts, and its handlers return the underlying message to the
+ * caller. That is not an oversight, and it is not the leak that WO#1137 fixed.
+ *
+ * Every route here is gated by `x-api-key` -> validateApiKey -> an active
+ * `xero-connector` subscription, so the caller is an authenticated customer,
+ * not the anonymous internet. The messages they receive are Xero's own
+ * validation text ("Invoice not found", "Account code is invalid", and so on),
+ * and Ben's live Power Automate flows read that text to branch on. Replacing it
+ * with "Internal server error" would not harden anything meaningful — it would
+ * break working flows in production.
+ *
+ * The anonymous surfaces — mcpAuth, connect, subscriptions, health — DO use the
+ * envelope, because there the caller is unauthenticated and the messages carry
+ * Key Vault, SQL and OAuth detail.
+ *
+ * test/errorEnvelopeScope.test.js pins this split. If you intend to change it,
+ * change the pin too, and check the Power Automate consumers first.
+ * ---------------------------------------------------------------------------
  */
 
 const PRODUCT_SLUG = 'xero-connector';

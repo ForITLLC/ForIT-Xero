@@ -4,6 +4,7 @@ import sql from 'mssql';
 import { getSecret, SECRETS } from '../services/keyvault';
 import { validateApiKey } from '../services/database';
 import { errorResponse, reportFailure } from '../services/errors';
+import { recordVerifiedEvent, recordRejectedSignature } from '../services/webhookState';
 
 // Lazy-initialized Stripe client
 let stripeClient: Stripe | null = null;
@@ -283,7 +284,7 @@ async function subscriptionsCheckout(request: HttpRequest, context: InvocationCo
 async function subscriptionsWebhook(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
   try {
     const stripe = await getStripe();
-    const webhookSecret = await getSecret(SECRETS.STRIPE_WEBHOOK_SECRET);
+    const webhookSecret = await getSecret(SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET);
 
     // Get the raw body and signature
     const rawBody = await request.text();
@@ -300,7 +301,10 @@ async function subscriptionsWebhook(request: HttpRequest, context: InvocationCon
     let event: Stripe.Event;
     try {
       event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
+      // The only proof that the configured secret is the one Stripe signs with.
+      recordVerifiedEvent();
     } catch (err) {
+      recordRejectedSignature();
       return errorResponse(context, 'Webhook signature verification failed', err, {
         status: 400,
         publicMessage: 'Webhook signature verification failed',

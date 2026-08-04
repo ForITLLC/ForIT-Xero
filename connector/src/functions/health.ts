@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { getSecret, SECRETS } from '../services/keyvault';
 import { reportFailure } from '../services/errors';
+import { getWebhookObservations } from '../services/webhookState';
 
 /**
  * GET /api/health
@@ -22,18 +23,24 @@ import { reportFailure } from '../services/errors';
 
 const CACHE_TTL_MS = 30_000;
 
-type Check = { ready: boolean; reason?: string };
+type Check = { ready: boolean; reason?: string; [key: string]: unknown };
+
+type ReadinessBasis = 'verified_event' | 'unproven' | 'credentials_missing';
 
 interface HealthPayload {
-  status: 'ok' | 'degraded';
+  status: 'ok' | 'unproven' | 'degraded';
   commit: string;
   built_at: string | null;
   checked_at: string;
   subscription_webhook_ready: boolean;
+  readiness_basis: ReadinessBasis;
+  readiness_note: string;
   checks: Record<string, Check>;
 }
 
-let cached: { at: number; payload: HealthPayload } | null = null;
+// Only the Key Vault reads are cached. Observed Stripe traffic is read fresh on
+// every request — it costs nothing and must not be stale.
+let cachedCredentials: { at: number; checks: Record<string, Check> } | null = null;
 let buildInfo: { commit: string; built_at: string | null } | null = null;
 
 /**
@@ -78,10 +85,15 @@ async function checkCredential(context: InvocationContext, label: string, secret
   }
 }
 
-async function buildPayload(context: InvocationContext): Promise<HealthPayload> {
+async function credentialChecks(context: InvocationContext): Promise<Record<string, Check>> {
+  const now = Date.now();
+  if (cachedCredentials && now - cachedCredentials.at <= CACHE_TTL_MS) {
+    return cachedCredentials.checks;
+  }
+
   const [stripeApi, stripeWebhook] = await Promise.all([
     checkCredential(context, 'stripe_api_credential', SECRETS.STRIPE_SECRET_KEY),
-    checkCredential(context, 'stripe_webhook_signing_credential', SECRETS.STRIPE_WEBHOOK_SECRET),
+    checkCredential(context, 'stripe_webhook_signing_credential', SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET),
   ]);
 
   const checks = {
@@ -89,31 +101,74 @@ async function buildPayload(context: InvocationContext): Promise<HealthPayload> 
     stripe_webhook_signing_credential: stripeWebhook,
   };
 
-  // The webhook needs both: one to talk to Stripe, one to verify the signature.
-  const subscriptionWebhookReady = stripeApi.ready && stripeWebhook.ready;
+  cachedCredentials = { at: now, checks };
+  return checks;
+}
+
+const READINESS_NOTES: Record<ReadinessBasis, string> = {
+  credentials_missing:
+    'A Stripe credential could not be read from Key Vault. The webhook cannot run.',
+  unproven:
+    'Both credentials resolve and the handler is covered by signature tests, but no real Stripe event ' +
+    'has verified against this signing secret on this instance. Stripe does not disclose a signing ' +
+    'secret on list or retrieve, so the secret is matched to the endpoint by elimination, not proven. ' +
+    'Only a real event settles it.',
+  verified_event:
+    'A real Stripe event verified against the configured signing secret on this instance.',
+};
+
+async function buildPayload(context: InvocationContext): Promise<HealthPayload> {
+  const checks = await credentialChecks(context);
+  const credentialsReady =
+    checks.stripe_api_credential.ready && checks.stripe_webhook_signing_credential.ready;
+
+  // Read fresh, never cached: this is the evidence the readiness claim rests on.
+  const observed = getWebhookObservations();
+
+  const basis: ReadinessBasis = !credentialsReady
+    ? 'credentials_missing'
+    : observed.verifiedCount > 0
+      ? 'verified_event'
+      : 'unproven';
+
   const { commit, built_at } = getBuildInfo();
 
   return {
-    status: subscriptionWebhookReady ? 'ok' : 'degraded',
+    // 'ok' is a claim about Stripe, and only a verified event can support it.
+    // 'unproven' is not an alarm — nothing is known to be broken — but it is
+    // not health either, and subscription_webhook_ready stays false for it.
+    status: basis === 'verified_event' ? 'ok' : basis === 'unproven' ? 'unproven' : 'degraded',
     commit,
     built_at,
     checked_at: new Date().toISOString(),
-    subscription_webhook_ready: subscriptionWebhookReady,
-    checks,
+    subscription_webhook_ready: basis === 'verified_event',
+    readiness_basis: basis,
+    readiness_note: READINESS_NOTES[basis],
+    checks: {
+      ...checks,
+      stripe_signature_verified: {
+        ready: observed.verifiedCount > 0,
+        ...(observed.verifiedCount === 0 ? { reason: 'no_verified_event_observed_by_this_instance' } : {}),
+        verified_count: observed.verifiedCount,
+        last_verified_at: observed.lastVerifiedAt,
+        // Reported, never alarmed on: this route is public and anonymous, so
+        // anyone can drive this number up with junk. It is a hint for a human
+        // reading the page, not a signal a monitor should trip on.
+        rejected_count: observed.rejectedCount,
+        last_rejected_at: observed.lastRejectedAt,
+      },
+    },
   };
 }
 
 async function health(_request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
-  const now = Date.now();
-  if (!cached || now - cached.at > CACHE_TTL_MS) {
-    cached = { at: now, payload: await buildPayload(context) };
-  }
-
-  const payload = cached.payload;
+  const payload = await buildPayload(context);
 
   return {
-    // Red while it is red: a degraded connector must not answer 200.
-    status: payload.status === 'ok' ? 200 : 503,
+    // Red only when something is actually broken. An unproven secret is stated
+    // in the body rather than shouted in the status line — a connector that
+    // has simply not seen an event yet is not a failing connector.
+    status: payload.status === 'degraded' ? 503 : 200,
     headers: { 'Cache-Control': 'no-store' },
     jsonBody: payload,
   };
