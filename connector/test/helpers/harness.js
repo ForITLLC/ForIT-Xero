@@ -30,11 +30,15 @@ function resolveDep(request) {
   return require.resolve(request, { paths: [CONNECTOR_ROOT] });
 }
 
+const seededExternals = new Set();
+
 function purge() {
   for (const key of Object.keys(require.cache)) {
     if (key.startsWith(DIST)) delete require.cache[key];
   }
   delete require.cache[resolveDep('@azure/functions')];
+  for (const key of seededExternals) delete require.cache[key];
+  seededExternals.clear();
 }
 
 /**
@@ -45,7 +49,7 @@ function purge() {
  * @param {object} stubs     map of dist-relative module path -> exports (e.g. {'services/keyvault.js': {...}})
  * @returns {{handlers: Record<string, Function>, registrations: Array}}
  */
-function loadFunctions(file, stubs = {}) {
+function loadFunctions(file, stubs = {}, externalStubs = {}) {
   purge();
 
   const registrations = [];
@@ -61,6 +65,14 @@ function loadFunctions(file, stubs = {}) {
 
   for (const [rel, exports] of Object.entries(stubs)) {
     seedModule(path.join(DIST, rel), exports);
+  }
+
+  // Third-party packages (mssql, stripe, the Azure SDKs) so no test can reach
+  // the network or a real database.
+  for (const [pkg, exports] of Object.entries(externalStubs)) {
+    const resolved = resolveDep(pkg);
+    seededExternals.add(resolved);
+    seedModule(resolved, exports);
   }
 
   require(path.join(DIST, file));
