@@ -1,0 +1,67 @@
+# Build-only PR check for the connector.
+#
+# WHY THIS IS A SEPARATE FILE, AND MUST STAY ONE:
+# `connector.yml` is a single linear job that ends in azure/login and
+# Azure/functions-action. It triggers only on push to main, so before this file
+# existed the first signal of a broken build was a FAILED PRODUCTION DEPLOY —
+# there was no PR-time check anywhere in this repo.
+#
+# The fix is structural, not conditional:
+#   * do NOT add `pull_request` to connector.yml — its job ends in a deploy, so
+#     a PR trigger there would deploy from a PR head;
+#   * do NOT use `pull_request_target` — it runs in the BASE context with
+#     secrets available, which is the exact anti-pattern here;
+#   * do NOT gate the deploy steps with an `if:` — a workflow that has learned
+#     to run on PRs is one careless edit away from deploying from one.
+#
+# This file references no secrets and has no deploy step. It cannot deploy no
+# matter how a future edit mangles it, and that is the entire point. Keep it
+# that way: nothing here should ever need `secrets.*`.
+
+name: Connector CI
+
+on:
+  pull_request:
+    paths:
+      - 'connector/**'
+      # Include this workflow's own path, or a PR touching only this file
+      # skips its own check — the same guard connector.yml already has.
+      - '.github/workflows/connector-ci.yml'
+
+# Read-only. This job never needs to write anything back.
+permissions:
+  contents: read
+
+env:
+  PACKAGE_PATH: connector
+  NODE_VERSION: '20.x'
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: connector/package-lock.json
+
+      # `npm ci` rather than `npm install`: it resolves purely from the
+      # lockfile, so a lockfile that no longer resolves fails HERE instead of
+      # inside a deploy.
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ${{ env.PACKAGE_PATH }}
+
+      - name: Build
+        run: npm run build
+        working-directory: ${{ env.PACKAGE_PATH }}
+
+      - name: Test
+        run: npm test
+        working-directory: ${{ env.PACKAGE_PATH }}
