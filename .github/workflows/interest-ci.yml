@@ -1,0 +1,62 @@
+# Build-only PR check for the interest lane.
+#
+# Same shape and same reasoning as connector-ci.yml: `interest.yml` is a single
+# linear job ending in azure/login and Azure/functions-action, triggered only on
+# push to main, so a broken build's first signal was a failed production deploy.
+#
+# This lane holds the destructive routes and the interest maths, and it had no
+# tests at all until WO#1148. A PR-time signal matters more here, not less.
+#
+# THIS FILE MUST NEVER DEPLOY. `forit-interest-accrual` is STOPPED — a human
+# stopped it and restarting it is Ben's decision alone. A build-only workflow
+# does not touch the running app, which is why this check is safe to add while
+# that decision is outstanding. Nothing here may deploy to it, start it, warm
+# it, ping it or "test-trigger" it. It references no secrets, and needing none
+# is the point.
+
+name: Interest CI
+
+on:
+  pull_request:
+    paths:
+      - 'interest/**'
+      # Include this workflow's own path, or a PR touching only this file
+      # skips its own check.
+      - '.github/workflows/interest-ci.yml'
+
+# Read-only. This job never needs to write anything back.
+permissions:
+  contents: read
+
+env:
+  PACKAGE_PATH: interest
+  NODE_VERSION: '20.x'
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: interest/package-lock.json
+
+      # `npm ci` rather than `npm install`: resolves purely from the lockfile,
+      # so a lockfile that no longer resolves fails HERE, not inside a deploy.
+      - name: Install dependencies
+        run: npm ci
+        working-directory: ${{ env.PACKAGE_PATH }}
+
+      - name: Build
+        run: npm run build
+        working-directory: ${{ env.PACKAGE_PATH }}
+
+      - name: Test
+        run: npm test
+        working-directory: ${{ env.PACKAGE_PATH }}
