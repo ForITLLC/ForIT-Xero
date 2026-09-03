@@ -40,8 +40,13 @@ Do not confuse these three, all of which have been mistaken for "the connector k
 | `{"error":"Invalid API key"}` | Header sent; no active row matches the hash | Mint a new key (below) |
 | `{"error":"Xero connection expired"}` | Key is fine; the *Xero* refresh token is dead | Re-consent at https://forit.io/portal. **A new API key fixes nothing.** |
 
-A 403 means the key is valid but the customer lacks an active `xero-connector`
-product grant; a 404 means no Xero connection row. Neither is a key problem.
+A 404 means no Xero connection row — not a key problem. A **403 now has two
+causes**, and the body tells them apart:
+
+| Body | Meaning | Fix |
+|---|---|---|
+| `{"error":"No active subscription"}` | Key is valid; the customer has no active `xero-connector` grant | Grant the product in `xero.customer_products` |
+| `{"error":"Read-only API key"}` | Key is valid and entitled, but scoped `read` and the caller attempted a write | Working as intended. Do **not** widen the key to silence it — see below. |
 
 ## Issuing a key
 
@@ -55,13 +60,60 @@ the portal. So there are two sanctioned paths:
    - `key = 'fmcp_' + base64url(randomBytes(32))`  → 48 chars total
    - `key_prefix = key.substring(0, 12)`
    - `key_hash = sha256(key)` (hex)
-   - `INSERT INTO xero.api_keys (customer_id, key_hash, key_prefix, name) VALUES (...)`
+   - `INSERT INTO xero.api_keys (customer_id, key_hash, key_prefix, name, scope) VALUES (...)`
+     — omit `scope` and the column defaults to `'full'`. Pass `'read'` deliberately.
 
    Legacy 37-char `fmcp_` keys predate the current generator. Length is not validated —
    only the hash is — but mint new keys at the current 48-char shape.
 
    The customer must also hold an active/trial `xero-connector` grant in
    `xero.customer_products`, or every call returns 403 (`checkProductAccess`, `database.ts:385`).
+
+## Key scope — `full` vs `read` (WO#1821B)
+
+`xero.api_keys.scope` (added by `connector/sql/007-add-api-key-scope.sql`) decides what a
+key may do. Two values, CHECK-constrained:
+
+| Scope | What it can do |
+|---|---|
+| `full` (default) | Everything the connector exposes. What every key issued before WO#1821B has. |
+| `read` | `GET` only, on every route — **and no Xero tokens at all** (see below). |
+
+**Where it is enforced.** `authenticateRequest()` (`connector.ts`) refuses a `read` key on
+any non-`GET`, before the subscription check, the connection lookup and the token refresh —
+so a refused request touches no Xero state. The check is on the HTTP method in the one place
+every route funnels through, *not* a per-route allow-list. That is deliberate: the catch-all
+`connector/{*path}` proxies whatever method it is handed straight to Xero, so a list that
+named the six write routes and missed the catch-all would enforce nothing, and a route added
+next month would be unprotected by default.
+
+**`GET /api/tokens` is refused for a `read` key regardless of method.** It is a GET, so a
+pure method gate would wave it through — but what it returns is a Xero *access and refresh
+token*, a full write credential the holder can use against Xero directly, outside this
+connector and outside every gate in it. Handing one to a read-only key makes the scope
+cosmetic. `mcpAuth.ts` blocks it separately for exactly that reason.
+
+**Anything that is not exactly `read` resolves to `full`.** A missing, null or misspelled
+scope keeps today's access rather than silently losing it mid-request, and `validateApiKey`
+probes for the column with `COL_LENGTH` so the code is safe against a database that has not
+run `sql/007` yet. The CHECK constraint is what stops a typo becoming a quiet privilege
+grant on a newly issued key — do not drop it.
+
+**Choosing a scope at issuance.** Default to `read` for any consumer that only needs to
+look at Xero data; that is most of them. Issue `full` only when the consumer has a named,
+approved write it must perform. Widening an existing key is a decision, not a fix: if a
+`read` key starts returning `{"error":"Read-only API key"}`, find out what write the caller
+started attempting before changing the row.
+
+Pinned by `connector/test/apiKeyScope.test.js`, which asserts (among other things) that the
+rejection happens *before* any upstream fetch.
+
+**Current production state (2026-09-03).** The gate is deployed (commit `25e4f65`), but
+`sql/007` has **not been applied** to `forit-saas-db` yet — that write is gated on Ben's
+approval. Until it runs, `COL_LENGTH` reports the column absent, every key resolves to
+`full`, and the gate is inert. Nothing is protected by scope in production until the
+migration lands and a key is issued with `scope = 'read'`. Applying it is the first step
+of turning this on; it is safe to run at any time and changes no existing key's access.
 
 ## Handing a key to a consumer — the rule
 
