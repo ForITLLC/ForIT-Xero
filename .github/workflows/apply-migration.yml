@@ -79,6 +79,27 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      # WO#1821B-2. The first run of this workflow (33730337822) died with
+      # "Login failed for user '<token-identified principal>'" — Azure Login and
+      # the token request both succeeded, so the principal authenticates to Azure
+      # perfectly well and simply has no user in the database. Routing that grant
+      # needs the principal's NAME, and the SQL error names nobody.
+      #
+      # The appId is an identifier, not a credential, but GitHub may still mask it
+      # as a substring of AZURE_CREDENTIALS — which would print '***' and answer
+      # nothing. So this maps it to a name, and falls back to a hash of it. Neither
+      # can be masked away, and neither discloses the secret.
+      - name: Identify the pipeline principal
+        run: |
+          APP_ID=$(az account show --query user.name -o tsv)
+          case "$APP_ID" in
+            4a5dbf71-78f8-4d3d-96fe-67f16e76242a) NAME="github-actions-forit-xero" ;;
+            0fdd95a7-43b1-48b7-a450-ecd3b1cf81ae) NAME="docforge-github-actions" ;;
+            *) NAME="unknown-principal (sha256=$(printf '%s' "$APP_ID" | sha256sum | cut -c1-16))" ;;
+          esac
+          echo "SQL_PRINCIPAL=$NAME" >> "$GITHUB_ENV"
+          echo "Pipeline principal: $NAME"
+
       - name: Get AAD access token for SQL
         id: token
         run: |
@@ -95,12 +116,33 @@ jobs:
           Import-Module SqlServer
           # Invoke-Sqlcmd -AccessToken wants a SecureString on current module versions.
           $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
-          Invoke-Sqlcmd `
-            -ServerInstance "${{ env.SQL_SERVER }}" `
-            -Database "${{ env.SQL_DATABASE }}" `
-            -AccessToken $secure `
-            -InputFile "connector/sql/${{ inputs.migration }}" `
-            -Verbose
+          try {
+            Invoke-Sqlcmd `
+              -ServerInstance "${{ env.SQL_SERVER }}" `
+              -Database "${{ env.SQL_DATABASE }}" `
+              -AccessToken $secure `
+              -InputFile "connector/sql/${{ inputs.migration }}" `
+              -Verbose
+          } catch {
+            # Authenticating to Azure is not the same as having a database user,
+            # and the raw error says only "<token-identified principal>". State the
+            # missing grant here so the next reader routes it instead of
+            # rediscovering it.
+            if ($_.Exception.Message -match 'Login failed for user') {
+              $p = $env:SQL_PRINCIPAL
+              Write-Host "::error::'$p' authenticates to Azure but has no database user in [${{ env.SQL_DATABASE }}] on ${{ env.SQL_SERVER }}. Apply the grant below as that server's Entra admin, connected to [${{ env.SQL_DATABASE }}]."
+              Write-Host "--- MISSING GRANT ---"
+              Write-Host "CREATE USER [$p] FROM EXTERNAL PROVIDER;"
+              Write-Host "ALTER ROLE db_ddladmin  ADD MEMBER [$p];  -- run migrations"
+              Write-Host "ALTER ROLE db_datareader ADD MEMBER [$p]; -- schema readback + smoke SELECT"
+              Write-Host "ALTER ROLE db_datawriter ADD MEMBER [$p]; -- smoke key insert + revoke"
+              Write-Host "-- FROM EXTERNAL PROVIDER on an application principal needs the SQL server's"
+              Write-Host "-- own identity to hold the Entra 'Directory Readers' role. Without it, name"
+              Write-Host "-- the principal by SID instead (appId GUID in little-endian binary):"
+              Write-Host "--   CREATE USER [$p] WITH SID = 0x<appId-as-binary>, TYPE = E;"
+            }
+            throw
+          }
           Write-Host "Migration applied."
 
       - name: Read back schema state
