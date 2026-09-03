@@ -1,5 +1,5 @@
 -- Product Pages table for dynamic product content
--- Run against forit-saas-db
+-- Run against forit-saas-sql.database.windows.net / database `forit`.
 
 CREATE TABLE product_pages (
   id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
