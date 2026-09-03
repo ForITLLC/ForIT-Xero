@@ -108,12 +108,33 @@ started attempting before changing the row.
 Pinned by `connector/test/apiKeyScope.test.js`, which asserts (among other things) that the
 rejection happens *before* any upstream fetch.
 
-**Current production state (2026-09-03).** The gate is deployed (commit `25e4f65`), but
-`sql/007` has **not been applied** to `forit-saas-db` yet — that write is gated on Ben's
-approval. Until it runs, `COL_LENGTH` reports the column absent, every key resolves to
-`full`, and the gate is inert. Nothing is protected by scope in production until the
-migration lands and a key is issued with `scope = 'read'`. Applying it is the first step
-of turning this on; it is safe to run at any time and changes no existing key's access.
+### Applying the migration, and checking whether it is applied
+
+**Migrations run in the pipeline, never from a chat session or a laptop.** Dispatch the
+**Apply SQL Migration** workflow (`.github/workflows/apply-migration.yml`) **from `main`**
+with `migration = 007-add-api-key-scope.sql`. It runs the file against
+`forit-saas-sql` / database `forit` using the same service principal `connector.yml`
+deploys with, reads the schema back, and confirms the app agrees. Set `scope_gate_smoke`
+to prove the gate live: it mints a throwaway `scope='read'` key inside the runner, POSTs
+with it, asserts a 403 whose body is `Read-only API key`, and revokes the key in a
+`finally` block. The plaintext never leaves that step.
+
+Note the database is **`forit`**, not `forit-saas-db` as `CLAUDE.md` claims — see
+`connector/src/services/database.ts`. The code is the authority.
+
+**To check whether the gate is armed, ask the app:**
+
+```bash
+curl -s https://xero.forit.io/api/health | jq '.checks.api_key_scope_gate'
+```
+
+`ready: true` means the column exists and a `scope='read'` key is enforced. `ready: false`
+with `reason: "scope_column_absent"` means the migration has not run, **every key resolves
+to `full`, and the gate is inert** — the code being deployed proves nothing on its own.
+That distinction is invisible from anywhere else, which is why health reports it.
+
+An unarmed gate deliberately does **not** turn health 503. An unapplied migration is not a
+fault, and should not page anyone.
 
 ## Handing a key to a consumer — the rule
 

@@ -255,22 +255,41 @@ export function normalizeScope(value: unknown): ApiKeyScope {
 }
 
 /**
- * Whether xero.api_keys has the scope column yet, cached for the life of the
- * process. Cached because this runs on every authenticated request and the
- * answer only changes when a migration runs, which restarts nothing — a stale
- * `false` costs one deploy's worth of keys reading as 'full', a stale `true`
- * is impossible (columns are not dropped here).
+ * Whether xero.api_keys has the scope column yet.
+ *
+ * ONLY THE POSITIVE IS CACHED, and that asymmetry is the whole point. The
+ * answer flips exactly once, when the migration runs — and applying a
+ * migration restarts nothing. Caching a `false` would leave every running
+ * instance resolving every key as 'full' for as long as it lived, so the gate
+ * would sit silently inert after the migration until somebody happened to
+ * redeploy. A security control that is off and reports nothing is worse than
+ * one that was never shipped. Once the column exists it cannot go away, so
+ * caching the `true` is safe and the re-probe stops immediately.
+ *
+ * The cost of the miss is one COL_LENGTH per authenticated request, only while
+ * unmigrated — cheap, and self-limiting.
  */
-let scopeColumnPresent: boolean | null = null;
+let scopeColumnPresent = false;
 
 async function hasScopeColumn(db: sql.ConnectionPool): Promise<boolean> {
-  if (scopeColumnPresent !== null) return scopeColumnPresent;
+  if (scopeColumnPresent) return true;
 
   const result = await db.request().query(
     `SELECT COL_LENGTH('xero.api_keys', 'scope') AS scope_column`
   );
   scopeColumnPresent = result.recordset[0]?.scope_column != null;
   return scopeColumnPresent;
+}
+
+/**
+ * Schema state for /api/health, so "is the read-only key gate actually armed?"
+ * is answerable from the app rather than needing a SQL client. Nothing else can
+ * answer it: the gate is dormant-but-present in the code the moment it deploys,
+ * and only the column decides whether it does anything.
+ */
+export async function getApiKeyScopeGateState(): Promise<{ armed: boolean }> {
+  const db = await getSaasPool();
+  return { armed: await hasScopeColumn(db) };
 }
 
 export async function validateApiKey(key: string): Promise<AuthenticatedCustomer | null> {

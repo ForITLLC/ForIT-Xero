@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { getSecret, SECRETS } from '../services/keyvault';
 import { reportFailure } from '../services/errors';
 import { getWebhookObservations } from '../services/webhookState';
-import { getSubscriptionEvidence } from '../services/database';
+import { getSubscriptionEvidence, getApiKeyScopeGateState } from '../services/database';
 
 /**
  * GET /api/health
@@ -94,16 +94,18 @@ async function credentialChecks(context: InvocationContext): Promise<Record<stri
     return cachedCredentials.checks;
   }
 
-  const [stripeApi, stripeWebhook, provisioning] = await Promise.all([
+  const [stripeApi, stripeWebhook, provisioning, scopeGate] = await Promise.all([
     checkCredential(context, 'stripe_api_credential', SECRETS.STRIPE_SECRET_KEY),
     checkCredential(context, 'stripe_webhook_signing_credential', SECRETS.STRIPE_SUBSCRIPTION_WEBHOOK_SECRET),
     provisioningCheck(context),
+    scopeGateCheck(context),
   ]);
 
   const checks = {
     stripe_api_credential: stripeApi,
     stripe_webhook_signing_credential: stripeWebhook,
     subscription_provisioning_observed: provisioning,
+    api_key_scope_gate: scopeGate,
   };
 
   cachedCredentials = { at: now, checks };
@@ -140,6 +142,37 @@ async function provisioningCheck(context: InvocationContext): Promise<Check> {
     };
   } catch (error) {
     reportFailure(context, 'Health check failed: subscription_provisioning_observed', error);
+    return { ready: false, reason: 'unavailable', scope: 'durable_cross_instance' };
+  }
+}
+
+/**
+ * Is the read-only API key gate armed?
+ *
+ * The code that enforces scope ships with the app, but it does nothing until
+ * xero.api_keys.scope exists — before the migration every key resolves to
+ * 'full'. Those two states are indistinguishable from outside, which is
+ * precisely the kind of quietly-inert control this route exists to stop being
+ * a surprise. Reporting it here means the answer needs the app, not a SQL
+ * client and a chat session.
+ *
+ * Deliberately NOT part of `readiness_basis`: an unapplied migration is not a
+ * fault, and must never turn this route 503. It is stated, not alarmed on.
+ */
+async function scopeGateCheck(context: InvocationContext): Promise<Check> {
+  try {
+    const { armed } = await getApiKeyScopeGateState();
+    return {
+      ready: armed,
+      ...(armed ? {} : { reason: 'scope_column_absent' }),
+      scope: 'durable_cross_instance',
+      note: armed
+        ? "xero.api_keys.scope exists — a key issued with scope='read' is enforced."
+        : 'xero.api_keys.scope does not exist, so every key resolves to full and the gate is inert. ' +
+          'Apply connector/sql/007-add-api-key-scope.sql via the Apply SQL Migration workflow.',
+    };
+  } catch (error) {
+    reportFailure(context, 'Health check failed: api_key_scope_gate', error);
     return { ready: false, reason: 'unavailable', scope: 'durable_cross_instance' };
   }
 }
