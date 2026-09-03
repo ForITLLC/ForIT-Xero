@@ -13,7 +13,8 @@
 -- only healthy consumer of this API, and a SELECT of a column that does not
 -- exist yet would fail every single auth call and take that lane down.
 --
--- Apply against forit-saas-sql.database.windows.net / forit-saas-db.
+-- Apply via the Apply SQL Migration workflow, which targets
+-- forit-saas-sql.database.windows.net / database `forit`. NOT `forit-saas-db`.
 
 IF COL_LENGTH('xero.api_keys', 'scope') IS NULL
 BEGIN

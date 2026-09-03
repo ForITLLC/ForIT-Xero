@@ -184,7 +184,7 @@ export async function withRefreshLock<T>(
   }
 }
 
-// Customer functions (use saasPool - forit-saas-db)
+// Customer functions (use saasPool - database `forit`)
 export async function createCustomer(email: string, companyName?: string, firstName?: string, lastName?: string): Promise<Customer> {
   const db = await getSaasPool();
   const result = await db.request()
@@ -216,7 +216,7 @@ export async function getCustomerById(id: string): Promise<Customer | null> {
   return result.recordset[0] || null;
 }
 
-// API Key functions (use saasPool - forit-saas-db)
+// API Key functions (use saasPool - database `forit`)
 export function generateApiKey(): { key: string; prefix: string; hash: string } {
   const keyBytes = crypto.randomBytes(32);
   const key = `fmcp_${keyBytes.toString('base64url')}`;
@@ -443,7 +443,7 @@ export async function getConnectedCustomerIds(): Promise<string[]> {
   return result.recordset.map((r) => String(r.customer_id));
 }
 
-// Customer-Product functions (use saasPool - forit-saas-db)
+// Customer-Product functions (use saasPool - database `forit`)
 export async function grantProductAccess(customerId: string, productSlug: string): Promise<void> {
   const db = await getSaasPool();
   await db.request()

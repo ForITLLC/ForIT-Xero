@@ -1,5 +1,5 @@
 -- Add portal_components column to product_pages table
--- Run against forit-saas-db
+-- Run against forit-saas-sql.database.windows.net / database `forit`.
 
 ALTER TABLE product_pages ADD portal_components NVARCHAR(MAX) NULL;
 

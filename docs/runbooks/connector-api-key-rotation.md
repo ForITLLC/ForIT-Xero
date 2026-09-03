@@ -119,8 +119,17 @@ to prove the gate live: it mints a throwaway `scope='read'` key inside the runne
 with it, asserts a 403 whose body is `Read-only API key`, and revokes the key in a
 `finally` block. The plaintext never leaves that step.
 
-Note the database is **`forit`**, not `forit-saas-db` as `CLAUDE.md` claims — see
-`connector/src/services/database.ts`. The code is the authority.
+Note the database is **`forit`**, not `forit-saas-db` — see
+`connector/src/services/database.ts:81`, which is the authority:
+`database: process.env.SAAS_DB_NAME || 'forit'`.
+
+`forit-saas-db` is a persistent and expensive misnomer. It is what the server is
+*named after*, and it appears in older `connector/sql/` headers and in this repo's
+`CLAUDE.md` — which is **gitignored**, so each machine carries its own copy and a
+correction on one does not reach the others. Assume any given session is working
+from the wrong name and check `database.ts` before connecting. WO#1821B lost
+close to an hour to it: a migration was routed at the wrong database, which
+surfaced as a login failure rather than as a "no such database" error.
 
 **To check whether the gate is armed, ask the app:**
 
