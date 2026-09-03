@@ -43,7 +43,7 @@ function forbidden() {
 const NOTHING_OBSERVED = { verifiedCount: 0, rejectedCount: 0, lastVerifiedAt: null, lastRejectedAt: null };
 const NO_DURABLE_EVIDENCE = { provisioned: 0, lastWriteAt: null };
 
-async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED, evidence = NO_DURABLE_EVIDENCE) {
+async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED, evidence = NO_DURABLE_EVIDENCE, scopeGate = { armed: false }) {
   const restore = [];
   for (const [key, value] of Object.entries(env)) {
     restore.push([key, process.env[key]]);
@@ -61,6 +61,10 @@ async function callHealth(behaviour, env = {}, observations = NOTHING_OBSERVED, 
         getSubscriptionEvidence: async () => {
           if (evidence instanceof Error) throw evidence;
           return evidence;
+        },
+        getApiKeyScopeGateState: async () => {
+          if (scopeGate instanceof Error) throw scopeGate;
+          return scopeGate;
         },
       },
     });
@@ -267,4 +271,52 @@ test('does not hand out vault or secret names', async () => {
 test('never returns a secret value', async () => {
   const { response } = await callHealth(async () => 'sk_live_super_secret_value');
   assert.ok(!clientVisible(response).includes('sk_live_super_secret_value'));
+});
+
+/**
+ * WO#1821B-2 — the scope gate is dormant-but-present in the code from the
+ * moment it deploys, and only the column decides whether it does anything.
+ * Those two states look identical from outside, so the app has to say which
+ * one it is in. This is also the migration's acceptance evidence: it is read
+ * from the app, not from a SQL client.
+ */
+test('reports the read-only key gate as inert while the scope column is absent', async () => {
+  const { response } = await callHealth(async () => 'value', {}, NOTHING_OBSERVED, NO_DURABLE_EVIDENCE, { armed: false });
+
+  const gate = response.jsonBody.checks.api_key_scope_gate;
+  assert.equal(gate.ready, false);
+  assert.equal(gate.reason, 'scope_column_absent');
+  assert.equal(gate.scope, 'durable_cross_instance');
+  assert.match(gate.note, /inert/);
+});
+
+test('reports the read-only key gate as armed once the scope column exists', async () => {
+  const { response } = await callHealth(async () => 'value', {}, NOTHING_OBSERVED, NO_DURABLE_EVIDENCE, { armed: true });
+
+  const gate = response.jsonBody.checks.api_key_scope_gate;
+  assert.equal(gate.ready, true);
+  assert.equal(gate.reason, undefined);
+});
+
+/**
+ * An unapplied migration is not a fault. If this ever flips the route to 503 it
+ * will page somebody for a schema change that broke nothing.
+ */
+test('an inert scope gate does not turn health red', async () => {
+  const { response } = await callHealth(async () => 'value', {}, NOTHING_OBSERVED, NO_DURABLE_EVIDENCE, { armed: false });
+
+  assert.equal(response.status, 200);
+  assert.notEqual(response.jsonBody.status, 'degraded');
+  assert.equal(response.jsonBody.readiness_basis, 'unproven');
+});
+
+test('a database that cannot answer is unknown, not a fault', async () => {
+  const { response } = await callHealth(
+    async () => 'value', {}, NOTHING_OBSERVED, NO_DURABLE_EVIDENCE, new Error('pool offline')
+  );
+
+  const gate = response.jsonBody.checks.api_key_scope_gate;
+  assert.equal(gate.ready, false);
+  assert.equal(gate.reason, 'unavailable');
+  assert.equal(response.status, 200);
 });

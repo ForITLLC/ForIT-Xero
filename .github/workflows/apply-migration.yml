@@ -1,0 +1,247 @@
+name: Apply SQL Migration
+
+# Runs a named file from connector/sql/ against forit-saas-sql / database
+# 'forit' — the database the connector itself uses (see
+# connector/src/services/database.ts: `database: process.env.SAAS_DB_NAME ||
+# 'forit'`). Note that is NOT the name CLAUDE.md gives; the code is the
+# authority.
+#
+# WHY THIS EXISTS (WO#1821B-2). Migrations were being treated as something a
+# chat session applies by hand, and the mm_run Azure pool has no SQL client at
+# all — no SqlServer module, no Az.Sql, no Invoke-Sqlcmd — so "apply the
+# migration" kept coming back as a blocker needing a human. It is not a human
+# decision; it is deploy work, and deploy work belongs in a pipeline with a run
+# id attached. Modelled on forit-support's apply-migration.yml.
+#
+# AUTH DIFFERS FROM forit-support's. That repo uses OIDC (AZURE_CLIENT_ID /
+# TENANT_ID / SUBSCRIPTION_ID plus a ref-scoped federated credential). This
+# repo has exactly one Azure secret — AZURE_CREDENTIALS, the client-secret
+# service principal that connector.yml already deploys with — so this reuses it
+# rather than provisioning new identity. Consequence: there is no ref-scoped
+# federated credential to trip over here.
+#
+# RUN IT FROM main ANYWAY. The file-existence check below reads the dispatched
+# ref, so dispatching a migration that only exists on a feature branch fails
+# with "not found". Merging first is also the safer ordering: it stops a schema
+# change existing in production but not in the branch history.
+#
+# IDEMPOTENT BY CONTRACT. Every migration here must be safe to re-run — this
+# workflow keeps no ledger of what has already been applied, so re-running is
+# the recovery path when a later step fails.
+
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: 'Filename in connector/sql/ (e.g. 007-add-api-key-scope.sql)'
+        required: true
+        type: string
+      scope_gate_smoke:
+        description: 'After applying: prove the read-only key gate live with a throwaway key (007 only)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  SQL_SERVER: forit-saas-sql.database.windows.net
+  SQL_DATABASE: forit
+  CONNECTOR_BASE: https://xero.forit.io
+
+jobs:
+  apply:
+    name: Apply ${{ inputs.migration }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify migration file exists
+        run: |
+          MIG="connector/sql/${{ inputs.migration }}"
+          if [ ! -f "$MIG" ]; then
+            echo "::error::Migration $MIG not found on this ref. Migrations must be merged to main before they can be applied."
+            exit 1
+          fi
+          echo "Found: $MIG"
+          wc -l "$MIG"
+
+      - name: Install SqlServer PowerShell module
+        shell: pwsh
+        run: |
+          Install-Module -Name SqlServer -Force -AllowClobber -Scope CurrentUser
+          Get-Module -Name SqlServer -ListAvailable | Select-Object Name, Version
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AAD access token for SQL
+        id: token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Run migration
+        shell: pwsh
+        env:
+          SQL_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module SqlServer
+          # Invoke-Sqlcmd -AccessToken wants a SecureString on current module versions.
+          $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
+          Invoke-Sqlcmd `
+            -ServerInstance "${{ env.SQL_SERVER }}" `
+            -Database "${{ env.SQL_DATABASE }}" `
+            -AccessToken $secure `
+            -InputFile "connector/sql/${{ inputs.migration }}" `
+            -Verbose
+          Write-Host "Migration applied."
+
+      - name: Read back schema state
+        shell: pwsh
+        env:
+          SQL_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module SqlServer
+          $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
+          # A separate -Query, deliberately. -InputFile on a file containing GO
+          # returns one DataSet PER BATCH, and the obvious inline rendering of
+          # that array silently prints "0 rows" — forit-support lost a
+          # migration's readback exactly that way. One query, one result set.
+          $rows = Invoke-Sqlcmd `
+            -ServerInstance "${{ env.SQL_SERVER }}" `
+            -Database "${{ env.SQL_DATABASE }}" `
+            -AccessToken $secure `
+            -Query "SELECT scope_column_length = COL_LENGTH('xero.api_keys', 'scope'), keys_total = (SELECT COUNT(*) FROM xero.api_keys), keys_active = (SELECT COUNT(*) FROM xero.api_keys WHERE is_active = 1)"
+          $rows | Format-List
+
+          # The scope breakdown has to be a SEPARATE, GUARDED query. Naming the
+          # column in the query above would make this step die with a parse
+          # error whenever the migration had not actually applied — which is the
+          # one case where its diagnostic is worth having.
+          if ($null -eq $rows.scope_column_length -or [System.DBNull]::Value.Equals($rows.scope_column_length)) {
+            Write-Host "::warning::xero.api_keys.scope does not exist after this run."
+          } else {
+            Invoke-Sqlcmd `
+              -ServerInstance "${{ env.SQL_SERVER }}" `
+              -Database "${{ env.SQL_DATABASE }}" `
+              -AccessToken $secure `
+              -Query "SELECT scope, keys = COUNT(*), active = SUM(CASE WHEN is_active = 1 THEN 1 ELSE 0 END) FROM xero.api_keys GROUP BY scope" |
+              Format-Table -AutoSize
+          }
+
+      # The acceptance evidence the app itself reports, not a SQL client. Health
+      # caches its checks for 30s, so this retries rather than reading once.
+      - name: Confirm the app reports the gate armed
+        env:
+          # Only the migration that arms the gate is failed by it being unarmed.
+          # Any other migration still reports the state — it is useful context —
+          # but must not go red for a flag it never touched.
+          REQUIRE_ARMED: ${{ contains(inputs.migration, 'api-key-scope') }}
+        run: |
+          for attempt in 1 2 3 4 5 6; do
+            BODY=$(curl -fsS --max-time 25 "${CONNECTOR_BASE}/api/health" || echo '{}')
+            READY=$(echo "$BODY" | jq -r '.checks.api_key_scope_gate.ready // "missing"')
+            COMMIT=$(echo "$BODY" | jq -r '.commit // "unknown"')
+            echo "attempt $attempt: api_key_scope_gate.ready=$READY commit=$COMMIT"
+            if [ "$READY" = "true" ]; then
+              echo "$BODY" | jq '{commit, checked_at, api_key_scope_gate: .checks.api_key_scope_gate}'
+              exit 0
+            fi
+            [ "$REQUIRE_ARMED" = "true" ] || { echo "gate not armed; not required by this migration"; exit 0; }
+            sleep 20
+          done
+          echo "::error::The app still reports the scope gate inert. If the running commit predates the COL_LENGTH re-probe fix, redeploy the connector."
+          exit 1
+
+      # Step 4 of WO#1821B, as a pipeline step rather than a hand-run chat
+      # session: prove the gate refuses a real read-scoped key in production.
+      #
+      # The key is generated, used and revoked INSIDE this one step, so the
+      # plaintext never crosses a step boundary, never reaches an output, and is
+      # masked before it is used anywhere. The revoke sits in `finally`, so it
+      # happens even when the assertion throws.
+      #
+      # The probe POSTs to a path Xero does not implement. The passthrough has
+      # no allow-list — it appends the path to api.xero.com/api.xro/2.0/ — so if
+      # the gate ever regressed, the request lands as a 404 at Xero rather than
+      # mutating accounting data.
+      - name: Prove the read-only gate live (throwaway key)
+        if: ${{ inputs.scope_gate_smoke }}
+        shell: pwsh
+        env:
+          SQL_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module SqlServer
+          $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
+
+          $bytes = [byte[]]::new(32)
+          [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+          $b64 = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
+          $key = "fmcp_$b64"
+          $prefix = $key.Substring(0, 12)
+          # Mask both before either is used anywhere. The prefix carries real key
+          # bytes, so it is masked too even though the schema stores it.
+          Write-Host "::add-mask::$key"
+          Write-Host "::add-mask::$prefix"
+          $hash = -join ([System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes($key)) | ForEach-Object { $_.ToString('x2') })
+
+          $sqlArgs = @{
+            ServerInstance = "${{ env.SQL_SERVER }}"
+            Database       = "${{ env.SQL_DATABASE }}"
+            AccessToken    = $secure
+          }
+
+          $insert = @'
+          DECLARE @cid UNIQUEIDENTIFIER = (SELECT TOP 1 id FROM xero.customers ORDER BY created_at);
+          IF @cid IS NULL THROW 50001, 'No customer to bind a throwaway key to', 1;
+          INSERT INTO xero.api_keys (customer_id, key_hash, key_prefix, name, scope)
+          VALUES (@cid, '$(hash)', '$(prefix)', 'WO1821B-2 scope gate smoke (throwaway)', 'read')
+          '@
+
+          $revoke = @'
+          UPDATE xero.api_keys SET is_active = 0 WHERE key_hash = '$(hash)'
+          SELECT key_prefix, name, scope, is_active, created_at, last_used_at
+          FROM xero.api_keys WHERE key_hash = '$(hash)'
+          '@
+
+          try {
+            Invoke-Sqlcmd @sqlArgs -Variable @("hash=$hash", "prefix=$prefix") -Query $insert
+            Write-Host "Throwaway read-scoped key inserted."
+
+            $url = "${{ env.CONNECTOR_BASE }}/api/connector/ScopeGateProbe"
+            $resp = Invoke-WebRequest -Uri $url -Method POST -Body '{}' `
+              -ContentType 'application/json' `
+              -Headers @{ 'x-api-key' = $key } `
+              -SkipHttpErrorCheck -MaximumRedirection 0
+
+            Write-Host "POST $url -> $($resp.StatusCode)"
+            Write-Host "response body: $($resp.Content)"
+
+            # Status alone is ambiguous: 'No active subscription' is also a 403.
+            # Only the scope gate emits this body, so the body is the assertion.
+            if ($resp.StatusCode -ne 403) {
+              throw "Expected 403 from the scope gate, got $($resp.StatusCode)"
+            }
+            if ($resp.Content -notmatch 'Read-only API key') {
+              throw "403 came from something other than the scope gate: $($resp.Content)"
+            }
+            Write-Host "PASS: a read-scoped key is refused on POST by the scope gate."
+          }
+          finally {
+            $row = Invoke-Sqlcmd @sqlArgs -Variable @("hash=$hash") -Query $revoke
+            Write-Host "--- throwaway key row after revoke ---"
+            $row | Format-List
+            if ($row.is_active -ne $false -and $row.is_active -ne 0) {
+              Write-Host "::error::Throwaway key was NOT revoked. Revoke it by hand immediately."
+            }
+          }
