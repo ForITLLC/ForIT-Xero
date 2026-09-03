@@ -17,6 +17,17 @@ export interface Customer {
   updated_at: Date;
 }
 
+/**
+ * What a key is allowed to do. 'full' is every capability this connector
+ * exposes; 'read' is GET-only — see authenticateRequest in functions/connector.ts,
+ * which is where this is enforced.
+ *
+ * Optional on the row type because the column is newer than the table: a
+ * database that has not run sql/007 yet returns rows without it, and those
+ * behave as 'full' (see normalizeScope).
+ */
+export type ApiKeyScope = 'full' | 'read';
+
 export interface ApiKey {
   id: string;
   customer_id: string;
@@ -24,9 +35,18 @@ export interface ApiKey {
   key_prefix: string;
   name: string;
   is_active: boolean;
+  scope?: ApiKeyScope;
   created_at: Date;
   last_used_at?: Date;
 }
+
+/**
+ * A customer as resolved from a presented API key. The scope belongs to the
+ * key, not to the customer — one customer can hold both a full key and a
+ * read-only one — so it rides along on the result of validateApiKey rather
+ * than living on Customer.
+ */
+export type AuthenticatedCustomer = Customer & { key_scope: ApiKeyScope };
 
 export interface XeroConnection {
   id: string;
@@ -223,26 +243,65 @@ export async function createApiKey(customerId: string, name = 'Default'): Promis
   return { apiKey: result.recordset[0], plainKey: key };
 }
 
-export async function validateApiKey(key: string): Promise<Customer | null> {
+/**
+ * Anything that is not exactly 'read' is 'full'. That direction is deliberate:
+ * a key whose scope is missing (schema not migrated yet), null, or misspelled
+ * keeps the access it has today rather than silently losing it mid-request.
+ * The CHECK constraint in sql/007 is what stops a typo becoming a quiet
+ * privilege grant on new keys.
+ */
+export function normalizeScope(value: unknown): ApiKeyScope {
+  return value === 'read' ? 'read' : 'full';
+}
+
+/**
+ * Whether xero.api_keys has the scope column yet, cached for the life of the
+ * process. Cached because this runs on every authenticated request and the
+ * answer only changes when a migration runs, which restarts nothing — a stale
+ * `false` costs one deploy's worth of keys reading as 'full', a stale `true`
+ * is impossible (columns are not dropped here).
+ */
+let scopeColumnPresent: boolean | null = null;
+
+async function hasScopeColumn(db: sql.ConnectionPool): Promise<boolean> {
+  if (scopeColumnPresent !== null) return scopeColumnPresent;
+
+  const result = await db.request().query(
+    `SELECT COL_LENGTH('xero.api_keys', 'scope') AS scope_column`
+  );
+  scopeColumnPresent = result.recordset[0]?.scope_column != null;
+  return scopeColumnPresent;
+}
+
+export async function validateApiKey(key: string): Promise<AuthenticatedCustomer | null> {
   const hash = crypto.createHash('sha256').update(key).digest('hex');
 
   const db = await getSaasPool();
+
+  // Probed rather than assumed. Selecting ak.scope against a database that has
+  // not run sql/007 fails the whole query, which would 500 every authenticated
+  // request — including the Power Automate lane — until the migration landed.
+  // This lets the code and the migration ship in either order.
+  const scoped = await hasScopeColumn(db);
+
   const result = await db.request()
     .input('key_hash', sql.NVarChar, hash)
     .query(`
-      SELECT c.* FROM xero.customers c
+      SELECT c.*, ${scoped ? 'ak.scope' : `'full'`} AS key_scope
+      FROM xero.customers c
       JOIN xero.api_keys ak ON c.id = ak.customer_id
       WHERE ak.key_hash = @key_hash AND ak.is_active = 1
     `);
 
-  if (result.recordset[0]) {
-    // Update last_used_at
-    await db.request()
-      .input('key_hash', sql.NVarChar, hash)
-      .query('UPDATE xero.api_keys SET last_used_at = GETUTCDATE() WHERE key_hash = @key_hash');
-  }
+  const row = result.recordset[0];
+  if (!row) return null;
 
-  return result.recordset[0] || null;
+  // Update last_used_at
+  await db.request()
+    .input('key_hash', sql.NVarChar, hash)
+    .query('UPDATE xero.api_keys SET last_used_at = GETUTCDATE() WHERE key_hash = @key_hash');
+
+  return { ...row, key_scope: normalizeScope(row.key_scope) };
 }
 
 // Xero Connection functions (use xeroPool - forit-xero-db)

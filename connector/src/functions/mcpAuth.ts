@@ -37,6 +37,22 @@ async function mcpGetTokens(request: HttpRequest, context: InvocationContext): P
       return { status: 401, jsonBody: { error: 'Invalid API key' } };
     }
 
+    // Refused for a read-only key regardless of method, which is why this gate
+    // is here and not folded into the method check in functions/connector.ts.
+    // This route is a GET, but what it returns is a Xero access token and
+    // refresh token — a full write credential. Whoever holds one can post to
+    // Xero directly, outside this connector and outside every gate in it, so
+    // handing one to a read-only key would make the read-only scope cosmetic.
+    if (customer.key_scope === 'read') {
+      return {
+        status: 403,
+        jsonBody: {
+          error: 'Read-only API key',
+          message: 'This API key is read-only and cannot obtain Xero tokens.',
+        },
+      };
+    }
+
     const connection = await getXeroConnection(customer.id);
     if (!connection) {
       return {

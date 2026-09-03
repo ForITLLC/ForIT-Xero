@@ -55,6 +55,24 @@ async function authenticateRequest(request: HttpRequest, context: InvocationCont
     return { status: 401, jsonBody: { error: 'Invalid API key' } };
   }
 
+  // Read-only scope, enforced here rather than per-route. Every write this
+  // connector exposes is a non-GET, INCLUDING the catch-all connector/{*path},
+  // which proxies whatever method it is given straight through to Xero — a
+  // per-route allow-list that gated the named write routes and missed the
+  // catch-all would buy nothing. Gating on the method in the one place every
+  // route already funnels through means a route added later is covered by
+  // default. Note this runs before the subscription check, the connection
+  // lookup and the token refresh: a refused request touches no Xero state.
+  if (customer.key_scope === 'read' && request.method.toUpperCase() !== 'GET') {
+    return {
+      status: 403,
+      jsonBody: {
+        error: 'Read-only API key',
+        message: `This API key is read-only. ${request.method} is not permitted.`,
+      },
+    };
+  }
+
   const hasAccess = await checkProductAccess(customer.id, PRODUCT_SLUG);
   if (!hasAccess) {
     return { status: 403, jsonBody: { error: 'No active subscription' } };
