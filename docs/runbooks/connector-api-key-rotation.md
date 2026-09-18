@@ -189,3 +189,37 @@ requests
 | summarize n = count(), lastSeen = max(timestamp) by p, resultCode
 | order by lastSeen desc
 ```
+
+## Xero OAuth scopes — what the code requests vs what the token carries (WO#2073)
+
+The scope list is `connector/src/services/xeroScopes.ts`: one constant, used at
+consent (`POST /api/connect/init`) and at refresh (`xeroConnection.ts`), pinned by
+`connector/test/xeroOAuthScopes.test.js`. Changing it changes **nothing** for an
+existing connection: Xero mints the token's `scope` claim at consent, and every
+refresh keeps that claim. So the two questions have two different answers:
+
+| Question | Where the answer is |
+|---|---|
+| What will the **next** consent request? | `xeroScopes.ts` at the deployed commit (`GET /api/health` → `commit`) |
+| What does the **current** token carry? | Dispatch **Read Xero Token Scope** (`.github/workflows/read-xero-token-scope.yml`). It prints the JWT `scope` claim per connection with the customer email and tenant; the access token is masked and the refresh token is never selected. |
+| Will Xero accept a scope string for this app? | `GET https://login.xero.com/identity/connect/authorize?response_type=code&client_id=…&redirect_uri=…&scope=…&state=x` — a `302` to `/identity/user/login` means accepted, a `302` to `/identity/error` means rejected. No consent happens; it is safe to run from anywhere. |
+
+After a scope change ships, each connected customer must re-consent. Two ways:
+
+1. **Portal (durable):** `https://www.forit.io/portal/xero-connector` → Connect. The portal
+   calls `POST /api/connect/init`, which builds the URL from the deployed list.
+2. **Hand-built URL:** same `authorize` URL as above with a real `state`
+   (`base64url({customer_id, return_url, timestamp})`). The callback rejects a `state`
+   older than **60 minutes** (`connect.ts`), so a staged URL is good for one hour from
+   the timestamp inside it — re-stage rather than extend the window.
+
+Scopes are additive on re-consent, so the new token carries the old grants plus the
+new ones. Two things the list cannot fix:
+
+- **Journals is tier-gated.** `accounting.journals.read` is necessary for `GET /Journals`
+  but not sufficient — Xero gates the Journals endpoint behind its Advanced tier and a
+  security assessment under the 2026 pricing model. A 401/403 on `/Journals` while the
+  token's claim already contains the scope is the tier gate, not this list.
+- **Broad scopes have a clock.** This app predates 2026-03-02, so the broad
+  `accounting.transactions` and `accounting.reports.read` stay valid until September
+  2027. Moving to the granular replacements is its own migration with its own re-consent.

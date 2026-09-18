@@ -1,6 +1,7 @@
 import { XeroClient } from 'xero-node';
 import type { Transaction } from 'mssql';
 import { getSecret, setSecret, disableSecret, SECRETS } from './keyvault';
+import { XERO_OAUTH_SCOPES } from './xeroScopes';
 import {
   getXeroConnection,
   updateXeroTokens,
@@ -77,15 +78,10 @@ async function getXeroClientForRefresh(): Promise<XeroClient> {
     clientId: XERO_CLIENT_ID,
     clientSecret,
     redirectUris: [`${BASE_URL}/api/callback`],
-    scopes: [
-      'openid',
-      'profile',
-      'email',
-      'accounting.transactions',
-      'accounting.settings',
-      'accounting.contacts',
-      'offline_access',
-    ],
+    // One list, shared with the consent path — see ./xeroScopes.ts. A
+    // refresh that asked for less than the consent did would narrow the
+    // grant without anyone noticing.
+    scopes: [...XERO_OAUTH_SCOPES],
   });
   await client.initialize();
   return client;
