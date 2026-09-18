@@ -3,6 +3,7 @@ import { XeroClient } from 'xero-node';
 import { getSecret, setSecret, SECRETS } from '../services/keyvault';
 import { getCustomerByEmail, saveXeroConnection } from '../services/database';
 import { probeConnection } from '../services/xeroConnection';
+import { XERO_OAUTH_SCOPES } from '../services/xeroScopes';
 import { errorResponse, reportFailure } from '../services/errors';
 
 /**
@@ -65,15 +66,8 @@ async function getXeroClient(state: string): Promise<XeroClient> {
     clientId: XERO_CLIENT_ID,
     clientSecret,
     redirectUris: [`${BASE_URL}/api/callback`],
-    scopes: [
-      'openid',
-      'profile',
-      'email',
-      'accounting.transactions',
-      'accounting.settings',
-      'accounting.contacts',
-      'offline_access',
-    ],
+    // One list, shared with the refresh path — see services/xeroScopes.ts.
+    scopes: [...XERO_OAUTH_SCOPES],
     state,
   });
 }

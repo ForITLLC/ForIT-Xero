@@ -1,0 +1,87 @@
+name: Read Xero Token Scope
+
+# WO#2073. READ-ONLY. Decodes the `scope` claim of every stored Xero access
+# token in xero.xero_connections and prints ONLY the claims that describe the
+# grant (scope, client_id, authentication event, issued/expiry) next to the
+# customer email and Xero tenant. The access token is masked before anything
+# is written to the log; the refresh token is never selected at all.
+#
+# WHY A PIPELINE: chat sessions have no SQL client (apply-migration.yml has
+# the long version), and "which scopes does the CURRENT token carry" lives in
+# the token's JWT payload — not in the code (the code says what the NEXT
+# consent will request) and not in the Xero developer portal.
+#
+# Same AZURE_CREDENTIALS principal apply-migration.yml uses
+# (github-actions-forit-xero), which holds SELECT on schema xero.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SQL_SERVER: forit-saas-sql.database.windows.net
+  SQL_DATABASE: forit
+
+jobs:
+  read-scope:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SqlServer PowerShell module
+        shell: pwsh
+        run: Install-Module -Name SqlServer -Force -AllowClobber -Scope CurrentUser
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AAD access token for SQL
+        id: token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: Decode the scope claim of each stored access token
+        shell: pwsh
+        env:
+          SQL_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module SqlServer
+          $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
+          $query = 'SELECT c.email, x.tenant_name, x.tenant_id, x.expires_at, x.created_at, x.updated_at, x.access_token ' +
+                   'FROM xero.xero_connections x LEFT JOIN xero.customers c ON c.id = x.customer_id ORDER BY x.updated_at DESC'
+          $rows = @(Invoke-Sqlcmd -ServerInstance $env:SQL_SERVER -Database $env:SQL_DATABASE -AccessToken $secure -Query $query)
+          Write-Host ("connections: {0}" -f $rows.Count)
+          foreach ($r in $rows) {
+            $tok = [string]$r.access_token
+            if ($tok) { Write-Host "::add-mask::$tok" }
+            $claims = $null
+            if ($tok -and $tok.Split('.').Count -ge 2) {
+              $p = $tok.Split('.')[1].Replace('-', '+').Replace('_', '/')
+              switch ($p.Length % 4) { 2 { $p += '==' } 3 { $p += '=' } }
+              $claims = [System.Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($p)) | ConvertFrom-Json
+            }
+            Write-Host "----"
+            Write-Host ("customer_email       : {0}" -f $r.email)
+            Write-Host ("tenant_name          : {0}" -f $r.tenant_name)
+            Write-Host ("tenant_id            : {0}" -f $r.tenant_id)
+            Write-Host ("row created_at (UTC) : {0}" -f $r.created_at)
+            Write-Host ("row updated_at (UTC) : {0}" -f $r.updated_at)
+            if ($claims) {
+              $iat = [DateTimeOffset]::FromUnixTimeSeconds([int64]$claims.iat).UtcDateTime
+              $exp = [DateTimeOffset]::FromUnixTimeSeconds([int64]$claims.exp).UtcDateTime
+              Write-Host ("jwt client_id        : {0}" -f $claims.client_id)
+              Write-Host ("jwt auth_event_id    : {0}" -f $claims.authentication_event_id)
+              Write-Host ("jwt iat / exp (UTC)  : {0} / {1}" -f $iat, $exp)
+              Write-Host ("jwt scope            : {0}" -f (@($claims.scope) -join ' '))
+            } else {
+              Write-Host "jwt scope            : (no access token stored, or not a JWT)"
+            }
+          }
