@@ -55,12 +55,8 @@ jobs:
           $ErrorActionPreference = 'Stop'
           Import-Module SqlServer
           $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
-          $query = @"
-SELECT c.email, x.tenant_name, x.tenant_id, x.expires_at, x.created_at, x.updated_at, x.access_token
-FROM xero.xero_connections x
-LEFT JOIN xero.customers c ON c.id = x.customer_id
-ORDER BY x.updated_at DESC
-"@
+          $query = 'SELECT c.email, x.tenant_name, x.tenant_id, x.expires_at, x.created_at, x.updated_at, x.access_token ' +
+                   'FROM xero.xero_connections x LEFT JOIN xero.customers c ON c.id = x.customer_id ORDER BY x.updated_at DESC'
           $rows = @(Invoke-Sqlcmd -ServerInstance $env:SQL_SERVER -Database $env:SQL_DATABASE -AccessToken $secure -Query $query)
           Write-Host ("connections: {0}" -f $rows.Count)
           foreach ($r in $rows) {
