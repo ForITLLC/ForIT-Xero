@@ -1,0 +1,101 @@
+name: Read Xero Schema Inventory
+
+# WO#1854 step 1 (inventory). READ-ONLY. Lists every object in the `xero`
+# schema of the shared `forit` database — tables with row counts, views,
+# routines — so the decommission doc can name what the connector writes and
+# the backup step (WO#1854 step 2) knows what to export. No data rows are
+# selected, only INFORMATION_SCHEMA metadata and COUNT(*).
+#
+# WHY A PIPELINE: chat sessions have no SQL client (see apply-migration.yml
+# and read-xero-token-scope.yml). Same AZURE_CREDENTIALS principal
+# (github-actions-forit-xero), which holds SELECT + VIEW DEFINITION on
+# schema xero.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SQL_SERVER: forit-saas-sql.database.windows.net
+  SQL_DATABASE: forit
+
+jobs:
+  read-inventory:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install SqlServer PowerShell module
+        shell: pwsh
+        run: Install-Module -Name SqlServer -Force -AllowClobber -Scope CurrentUser
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AAD access token for SQL
+        id: token
+        run: |
+          TOKEN=$(az account get-access-token --resource https://database.windows.net/ --query accessToken -o tsv)
+          echo "::add-mask::$TOKEN"
+          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+
+      - name: List xero schema objects with row counts
+        shell: pwsh
+        env:
+          SQL_TOKEN: ${{ steps.token.outputs.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Import-Module SqlServer
+          $secure = ConvertTo-SecureString -String $env:SQL_TOKEN -AsPlainText -Force
+          function Q([string]$sql) {
+            @(Invoke-Sqlcmd -ServerInstance $env:SQL_SERVER -Database $env:SQL_DATABASE -AccessToken $secure -Query $sql)
+          }
+          Write-Host "## database: $($env:SQL_DATABASE) on $($env:SQL_SERVER)"
+          Write-Host "## schemas visible to this principal:"
+          Q("SELECT DISTINCT TABLE_SCHEMA FROM INFORMATION_SCHEMA.TABLES ORDER BY TABLE_SCHEMA") | ForEach-Object { Write-Host ("  " + $_.TABLE_SCHEMA) }
+
+          Write-Host "## xero tables (row counts):"
+          $tables = Q("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = 'xero' AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME")
+          foreach ($t in $tables) {
+            $n = $t.TABLE_NAME
+            $cnt = (Q("SELECT COUNT_BIG(*) AS c FROM xero.[$n]"))[0].c
+            $cols = (Q("SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'xero' AND TABLE_NAME = '$n'"))[0].c
+            Write-Host ("  xero.{0,-40} rows={1,-10} columns={2}" -f $n, $cnt, $cols)
+          }
+
+          Write-Host "## xero views:"
+          Q("SELECT TABLE_NAME FROM INFORMATION_SCHEMA.VIEWS WHERE TABLE_SCHEMA = 'xero' ORDER BY TABLE_NAME") | ForEach-Object { Write-Host ("  xero." + $_.TABLE_NAME) }
+
+          Write-Host "## xero routines (procedures/functions):"
+          Q("SELECT ROUTINE_NAME, ROUTINE_TYPE FROM INFORMATION_SCHEMA.ROUTINES WHERE ROUTINE_SCHEMA = 'xero' ORDER BY ROUTINE_NAME") | ForEach-Object { Write-Host ("  xero." + $_.ROUTINE_NAME + " (" + $_.ROUTINE_TYPE + ")") }
+
+          Write-Host "## foreign keys INTO or OUT OF xero (cross-schema dependencies matter for the backup):"
+          $fk = Q(@"
+            SELECT fk.name AS fk_name,
+                   SCHEMA_NAME(tp.schema_id) + '.' + tp.name AS parent_table,
+                   SCHEMA_NAME(tr.schema_id) + '.' + tr.name AS referenced_table
+            FROM sys.foreign_keys fk
+            JOIN sys.tables tp ON fk.parent_object_id = tp.object_id
+            JOIN sys.tables tr ON fk.referenced_object_id = tr.object_id
+            WHERE SCHEMA_NAME(tp.schema_id) = 'xero' OR SCHEMA_NAME(tr.schema_id) = 'xero'
+            ORDER BY parent_table
+"@)
+          if ($fk.Count -eq 0) { Write-Host "  (none)" }
+          foreach ($f in $fk) { Write-Host ("  {0}: {1} -> {2}" -f $f.fk_name, $f.parent_table, $f.referenced_table) }
+
+          Write-Host "## most recent write per xero table (max of any *_at / updated / created column):"
+          foreach ($t in $tables) {
+            $n = $t.TABLE_NAME
+            $tsCols = Q("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = 'xero' AND TABLE_NAME = '$n' AND DATA_TYPE IN ('datetime','datetime2','datetimeoffset') AND (COLUMN_NAME LIKE '%updated%' OR COLUMN_NAME LIKE '%created%' OR COLUMN_NAME LIKE '%_at' OR COLUMN_NAME LIKE '%synced%')")
+            if ($tsCols.Count -eq 0) { Write-Host ("  xero.{0}: (no timestamp column)" -f $n); continue }
+            $exprs = ($tsCols | ForEach-Object { "MAX([" + $_.COLUMN_NAME + "]) AS [" + $_.COLUMN_NAME + "]" }) -join ', '
+            $row = (Q("SELECT $exprs FROM xero.[$n]"))[0]
+            $parts = @()
+            foreach ($c in $tsCols) { $parts += ($c.COLUMN_NAME + "=" + $row.($c.COLUMN_NAME)) }
+            Write-Host ("  xero.{0}: {1}" -f $n, ($parts -join '  '))
+          }
